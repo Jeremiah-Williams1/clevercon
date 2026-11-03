@@ -8,7 +8,8 @@
 #
 # Usage (inside tmux, so it survives a dropped SSH connection):
 #   cd ~/clevercon
-#   ./ops/scripts/baseline.sh checks      # typecheck, lint, format, build, unit tests
+#   ./ops/scripts/baseline.sh checks      # typecheck, lint, format, build (web + api), unit tests
+#   ./ops/scripts/baseline.sh dev         # writes apps/web/.env.local and prints the dev commands (run checks first)
 #   ./ops/scripts/baseline.sh e2e         # money loop on Stellar TESTNET (needs checks first; deferred to P2)
 #   ./ops/scripts/baseline.sh contracts   # cargo fmt/clippy/test (needs Rust; deferred to P4)
 #   ./ops/scripts/baseline.sh down        # stop services + containers
@@ -41,8 +42,8 @@ say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m! %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mx %s\033[0m\n' "$*"; exit 1; }
 
-# `down` only stops things; it should not create an empty report folder.
-if [ "$CMD" != "down" ]; then
+# `down` and `dev` do not produce reports, so they should not create an empty report folder.
+if [ "$CMD" != "down" ] && [ "$CMD" != "dev" ]; then
   mkdir -p "$REPORT"
   printf 'step\tstatus\tseconds\tlog\n' > "$RESULTS"
 fi
@@ -126,7 +127,9 @@ make_env() {
     setenv POSTGRES_PASSWORD "$pgpass"
     setenv DATABASE_URL "postgresql://clevercon:${pgpass}@localhost:5432/clevercon"
     setenv BACKEND full
-    setenv VITE_BACKEND full
+    # NOTE: no VITE_* here on purpose. Vite reads env files from apps/web/, not the repo root,
+    # so they would do nothing; and `checks` should build the web app with defaults (demo mode),
+    # the same way upstream CI does, so the two results stay comparable. See the `dev` command.
     chmod 600 .env
     echo "   created .env with fresh secrets (BACK UP DELEGATE_ENCRYPTION_KEY if you keep this host)"
   else
@@ -170,7 +173,8 @@ quality_gates() {
   run_step typecheck npm run typecheck
   run_step lint npm run lint
   run_step format_check npm run format:check
-  run_step build npm run build
+  run_step build npm run build                       # = build:web (agent-sdk + web app only)
+  run_step build_api npm run build -w @clevercon/api # the API is built separately (see Dockerfile)
   run_step unit_tests npm test
 }
 
@@ -252,11 +256,39 @@ case "$CMD" in
     run_step build_registry_wasm bash -c "cd '$REPO/contracts/registry' && cargo build --release --target wasm32v1-none"
     summary
     ;;
+  dev)
+    cd "$REPO" || die "no repo"
+    [ -f .env ] || die "run './ops/scripts/baseline.sh checks' first (it creates .env and starts Postgres/Redis)"
+    # apps/web/.env.local is git-ignored. API_URL is what the BROWSER uses to reach the API:
+    # localhost is right when you use an SSH tunnel; use http://<public-ip>:4100 only for a shared demo.
+    WEB_API_URL="${API_URL:-http://localhost:4100}"
+    if [ -f apps/web/.env.local ]; then
+      echo "apps/web/.env.local exists, left untouched"
+    else
+      printf 'VITE_BACKEND=full\nVITE_NETWORK=testnet\nVITE_API_URL=%s\n' "$WEB_API_URL" > apps/web/.env.local
+      echo "created apps/web/.env.local (VITE_API_URL=$WEB_API_URL)"
+    fi
+    docker compose up -d --wait postgres redis >/dev/null 2>&1 && echo "postgres + redis are up" || warn "could not confirm postgres/redis; run: docker compose up -d postgres redis"
+    cat <<'EOT'
+
+Dev stack: run each in its own tmux window (Ctrl-b c = new window, Ctrl-b n = next):
+  npm run dev -w @clevercon/api        # API on :4100
+  npm run dev -w @clevercon/workers
+  npm run dev -w @clevercon/indexer
+  npm run dev -w @clevercon/web        # web app (Vite) on :5173
+
+From your LAPTOP, open a tunnel, then browse http://localhost:5173:
+  ssh -i <key> -L 4100:localhost:4100 -L 5173:localhost:5173 ubuntu@<public-ip>
+
+Do NOT open 4100/5173/5432/6379 in the security group for the tunnel to work.
+Dev uses the shared Testnet contracts by default: do not run e2e or hire/pay flows here.
+EOT
+    ;;
   down)
     stop_services
     cd "$REPO" 2>/dev/null && docker compose down
     ;;
   *)
-    die "usage: $0 [checks|e2e|contracts|down]"
+    die "usage: $0 [checks|dev|e2e|contracts|down]"
     ;;
 esac
