@@ -1,40 +1,52 @@
 #!/usr/bin/env bash
-# CleverCon baseline harness for a fresh Ubuntu EC2 host (Stage 1b).
+# CleverCon baseline harness. Runs ON THE EC2 HOST, from inside the checkout that
+# bootstrap-host.sh cloned (~/clevercon).
 #
 # Goal: produce EVIDENCE of what works today, unmodified, on a clean machine.
-# It changes nothing in the repo (only untracked files: .env, wallets.json,
-# docker-compose.override.yml, which are git-ignored/excluded).
+# It changes nothing tracked in the repo. It only creates untracked, git-ignored files:
+# .env, wallets.json (e2e only), docker-compose.override.yml (excluded locally).
 #
-# Usage:
-#   FORK_URL=https://github.com/<you>/clevercon.git ./baseline-ec2.sh checks
-#   ./baseline-ec2.sh e2e        # full money loop on Stellar TESTNET (needs checks first)
-#   ./baseline-ec2.sh contracts  # cargo fmt/clippy/test (needs Rust; heavy on small hosts)
-#   ./baseline-ec2.sh down       # stop services + containers
+# Usage (inside tmux, so it survives a dropped SSH connection):
+#   cd ~/clevercon
+#   ./ops/scripts/baseline.sh checks      # typecheck, lint, format, build, unit tests
+#   ./ops/scripts/baseline.sh e2e         # money loop on Stellar TESTNET (needs checks first; deferred to P2)
+#   ./ops/scripts/baseline.sh contracts   # cargo fmt/clippy/test (needs Rust; deferred to P4)
+#   ./ops/scripts/baseline.sh down        # stop services + containers
 #
-# Env:
-#   FORK_URL   required on first run (your fork)
-#   WORKDIR    default $HOME/clevercon-baseline
+# Env (all optional):
+#   REPORTS_DIR   where reports go. Default: $HOME/clevercon-reports (OUTSIDE the repo, so
+#                 logs never show up in `git status` or get committed by accident)
 #
 # Security notes:
-#   * The API binds 0.0.0.0:4100. Do NOT open 4100/5432/6379 in the EC2 security
-#     group. Reach the API through an SSH tunnel: ssh -L 4100:localhost:4100 ...
-#   * Secrets are generated fresh and written only to .env on this host.
+#   * The API binds 0.0.0.0:4100. Do NOT open 4100/5432/6379 in the EC2 security group.
+#     Reach the API through an SSH tunnel: ssh -L 4100:localhost:4100 ...
+#   * Secrets are generated fresh and written only to .env on this host. They are never
+#     printed or copied into the reports.
 
 set -uo pipefail
 
-WORKDIR="${WORKDIR:-$HOME/clevercon-baseline}"
-REPO="$WORKDIR/clevercon"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REPORT="$WORKDIR/reports/$STAMP"
-RESULTS="$REPORT/results.tsv"
-CMD="${1:-checks}"
+# The checkout is wherever this script lives (works from any current directory).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
+  || { echo "x this script must live inside the git checkout (expected ~/clevercon/ops/scripts/)"; exit 1; }
 
-mkdir -p "$REPORT"
-printf 'step\tstatus\tseconds\tlog\n' > "$RESULTS"
+REPORTS_ROOT="${REPORTS_DIR:-$HOME/clevercon-reports}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+REPORT="$REPORTS_ROOT/$STAMP"
+RESULTS="$REPORT/results.tsv"
+PIDS="$REPORTS_ROOT/pids"
+CMD="${1:-checks}"
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m! %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mx %s\033[0m\n' "$*"; exit 1; }
+
+# `down` only stops things; it should not create an empty report folder.
+if [ "$CMD" != "down" ]; then
+  mkdir -p "$REPORT"
+  printf 'step\tstatus\tseconds\tlog\n' > "$RESULTS"
+fi
+mkdir -p "$PIDS"
 
 # run_step <name> <command...> : logs output, records pass/fail + duration, never aborts.
 run_step() {
@@ -78,31 +90,29 @@ preflight() {
   } | tee "$REPORT/host.txt"
 
   for bin in git docker openssl curl; do
-    command -v "$bin" >/dev/null || die "missing: $bin"
+    command -v "$bin" >/dev/null || die "missing: $bin (bootstrap-host.sh should have installed it; check /var/log/bootstrap.log)"
   done
-  docker compose version >/dev/null 2>&1 || die "docker compose plugin missing"
-  docker info >/dev/null 2>&1 || die "docker daemon not reachable (is your user in the docker group?)"
+  docker compose version >/dev/null 2>&1 || die "docker compose plugin missing (check /var/log/bootstrap.log)"
+  docker info >/dev/null 2>&1 || die "docker daemon not reachable. After bootstrap you must log out and SSH back in so the 'docker' group applies to your session."
 
-  command -v node >/dev/null || die "node missing (install Node 20 via nvm; repo pins .nvmrc)"
+  command -v node >/dev/null || die "node missing (bootstrap-host.sh installs Node system-wide; check /var/log/bootstrap.log)"
   local major; major=$(node -v | sed 's/v\([0-9]*\).*/\1/')
   [ "$major" -ge 20 ] || die "Node >= 20 required, found $(node -v)"
+  # The repo pins its Node version in .nvmrc; record it next to what is installed so a mismatch is visible.
+  { echo "repo .nvmrc: $(cat "$REPO/.nvmrc" 2>/dev/null || echo 'none')"; echo "installed node: $(node -v)"; } | tee "$REPORT/node.txt"
 
-  local mem; mem=$(free -m | awk '/Mem:/{print $2}')
-  local swap; swap=$(free -m | awk '/Swap:/{print $2}')
+  local mem swap
+  mem=$(free -m | awk '/Mem:/{print $2}')
+  swap=$(free -m | awk '/Swap:/{print $2}')
   if [ $((mem + swap)) -lt 3500 ]; then
-    warn "RAM+swap < 3.5GB: npm ci/tsc may be OOM-killed. Add swap (e.g. 4G) or use a t3.medium."
+    warn "RAM+swap < 3.5GB: npm ci/tsc may be OOM-killed. Use a t3.large (8 GB) or add swap."
   fi
 }
 
-get_repo() {
-  say "repo"
-  if [ ! -d "$REPO/.git" ]; then
-    [ -n "${FORK_URL:-}" ] || die "set FORK_URL on first run"
-    mkdir -p "$WORKDIR"
-    git clone "$FORK_URL" "$REPO" || die "clone failed"
-  fi
-  ( cd "$REPO" && git rev-parse HEAD ) | tee "$REPORT/commit.txt"
-  ( cd "$REPO" && cat .nvmrc ) > "$REPORT/nvmrc.txt" 2>/dev/null || true
+record_commit() {
+  say "commit under test"
+  git -C "$REPO" rev-parse HEAD | tee "$REPORT/commit.txt"
+  git -C "$REPO" log -1 --format='%an | %ad | %s' | tee -a "$REPORT/commit.txt"
 }
 
 make_env() {
@@ -123,8 +133,9 @@ make_env() {
     echo "   .env exists, left untouched"
   fi
 
-  # The repo's compose file publishes 5432/6379 on ALL interfaces with default
-  # creds. Rebind to loopback with a local-only override (needs Compose >= 2.24.4).
+  # The repo's compose file publishes 5432/6379 on ALL interfaces with default creds.
+  # Rebind to loopback (127.0.0.1) with a local-only override (needs Compose >= 2.24.4).
+  # Compose merges docker-compose.override.yml automatically; his file stays untouched.
   local cv; cv=$(docker compose version --short 2>/dev/null | sed 's/^v//')
   if [ "$(printf '%s\n2.24.4\n' "$cv" | sort -V | head -1)" = "2.24.4" ]; then
     cat > docker-compose.override.yml <<'YAML'
@@ -166,8 +177,11 @@ quality_gates() {
 summary() {
   say "summary ($REPORT)"
   column -t -s $'\t' "$RESULTS"
+  # Evidence that the run changed no tracked files in the repo (untracked/ignored files do not appear here).
+  git -C "$REPO" status --short > "$REPORT/git-status.txt" 2>&1
   echo
-  echo "Attach $REPORT (host.txt, commit.txt, results.tsv, logs) to your Stage 1 findings."
+  echo "tracked-file changes in the repo: $(grep -vc '^??' "$REPORT/git-status.txt" || true) (expected 0)"
+  echo "Reports are in $REPORT (outside the repo). Copy them off with pull-reports.sh BEFORE terminating the instance."
 }
 
 start_services() {
@@ -175,11 +189,11 @@ start_services() {
   mkdir -p "$REPORT/svc"
   say "starting api/workers/indexer (logs in $REPORT/svc)"
   npm run build -w @clevercon/api >"$REPORT/svc/api-build.log" 2>&1 || die "api build failed"
-  # Run from repo root so each service finds ./.env (they do not source it in bash;
+  # Run from repo root so each service finds ./.env (never `source` it in bash:
   # NETWORK_PASSPHRASE contains spaces and ';').
-  nohup npm run start -w @clevercon/api      >"$REPORT/svc/api.log"     2>&1 & echo $! > "$WORKDIR/api.pid"
-  nohup npm run start -w @clevercon/workers  >"$REPORT/svc/workers.log" 2>&1 & echo $! > "$WORKDIR/workers.pid"
-  nohup npm run start -w @clevercon/indexer  >"$REPORT/svc/indexer.log" 2>&1 & echo $! > "$WORKDIR/indexer.pid"
+  nohup npm run start -w @clevercon/api      >"$REPORT/svc/api.log"     2>&1 & echo $! > "$PIDS/api.pid"
+  nohup npm run start -w @clevercon/workers  >"$REPORT/svc/workers.log" 2>&1 & echo $! > "$PIDS/workers.pid"
+  nohup npm run start -w @clevercon/indexer  >"$REPORT/svc/indexer.log" 2>&1 & echo $! > "$PIDS/indexer.pid"
 
   for i in $(seq 1 60); do
     if curl -fsS http://localhost:4100/ready >"$REPORT/ready.json" 2>/dev/null; then
@@ -193,10 +207,10 @@ start_services() {
 
 stop_services() {
   for s in api workers indexer; do
-    if [ -f "$WORKDIR/$s.pid" ]; then
-      pkill -P "$(cat "$WORKDIR/$s.pid")" 2>/dev/null || true
-      kill "$(cat "$WORKDIR/$s.pid")" 2>/dev/null || true
-      rm -f "$WORKDIR/$s.pid"
+    if [ -f "$PIDS/$s.pid" ]; then
+      pkill -P "$(cat "$PIDS/$s.pid")" 2>/dev/null || true
+      kill "$(cat "$PIDS/$s.pid")" 2>/dev/null || true
+      rm -f "$PIDS/$s.pid"
     fi
   done
 }
@@ -204,14 +218,14 @@ stop_services() {
 case "$CMD" in
   checks)
     preflight
-    get_repo
+    record_commit
     make_env
     install_and_db
     quality_gates
     summary
     ;;
   e2e)
-    get_repo
+    record_commit
     cd "$REPO" || die "no repo"
     [ -f .env ] || die "run 'checks' first"
     # Faucet wallet used by the harness (testnet only; friendbot + DEX swap).
@@ -220,12 +234,14 @@ case "$CMD" in
     run_step fund_testnet_usdc npx tsx scripts/fund-testnet-usdc.ts
     start_services
     trap stop_services EXIT
-    # NOTE: this hits the shared Testnet contracts in .env with a throwaway keypair.
+    # NOTE: this hits the SHARED Testnet contracts in .env with a throwaway keypair.
+    # UNVERIFIED: E2E_SKIP_HIRE may not be a real variable name. Check scripts/e2e-testnet.ts
+    # before trusting this run (an unknown variable is silently ignored).
     run_step e2e_testnet env E2E_SKIP_HIRE=1 npx tsx scripts/e2e-testnet.ts
     summary
     ;;
   contracts)
-    get_repo
+    record_commit
     command -v cargo >/dev/null || die "install Rust (rustup) first"
     rustup target add wasm32v1-none >/dev/null 2>&1 || true
     for c in agent-vault policy-verifier; do
