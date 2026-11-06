@@ -1,0 +1,114 @@
+# Staging stack: api, workers, indexer, Postgres, Redis.
+# Run from the repo root:
+#   docker compose --env-file ops/staging/.env.staging \
+#     -f ops/staging/docker-compose.staging.yml up -d
+name: clevercon-staging
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      BASE_IMAGE: clevercon-base:local
+  image: clevercon-staging:local
+  env_file: .env.staging
+  restart: unless-stopped
+  init: true
+  logging:
+    driver: json-file
+    options: { max-size: '10m', max-file: '3' }
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clevercon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run the env generator first}
+      POSTGRES_DB: clevercon
+    ports:
+      - '127.0.0.1:5432:5432' # host-only, for debugging over SSM
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U clevercon -d clevercon']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${REDIS_PASSWORD:?run the env generator first}']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+  api:
+    <<: *app
+    command: ['node', 'services/api/dist/src/main.js']
+    ports:
+      - '127.0.0.1:4100:4100' # host-only; reach it with SSM port forwarding
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
+
+  workers:
+    <<: *app
+    command: ['node', '--import', 'tsx', 'services/workers/src/index.ts']
+    mem_limit: 1g
+
+  indexer:
+    <<: *app
+    command: ['node', '--import', 'tsx', 'services/indexer/src/index.ts']
+    mem_limit: 512m
+  
+  web:
+    # Vite dev server (same as dev). Loopback-only; no secrets: it gets no env_file.
+    image: clevercon-staging:local
+    restart: unless-stopped
+    init: true
+    working_dir: /app/apps/web
+    command: ['../../node_modules/.bin/vite', '--host', '0.0.0.0', '--port', '5173']
+    environment:
+      NODE_ENV: development
+      VITE_NETWORK: testnet
+      VITE_BACKEND: full
+      VITE_API_URL: http://localhost:4100 # the browser calls this, through the tunnel
+    ports:
+      - '127.0.0.1:5173:5173'
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
+
+volumes:
+  pgdata:
+  redisdata:

@@ -17,7 +17,7 @@ set -euo pipefail
 
 # ---- settings (edit here, nowhere else) -------------------------------------
 REPO_URL="https://github.com/Jeremiah-Williams1/clevercon.git"
-BRANCH="infra/main"
+BRANCH="infra/staging"
 TARGET_USER="ubuntu"          # default login user on Ubuntu AMIs
 SWAP_SIZE="4G"
 NODE_MAJOR="20"
