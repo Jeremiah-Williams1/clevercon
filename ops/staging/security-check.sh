@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run on the staging host. PASS/FAIL lockdown checks; prints no secret values.
 set -uo pipefail
-ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"; cd "$ROOT"
+ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"; cd "$ROOT" || exit 1
 ENV=ops/staging/.env.staging; IMG=clevercon-staging:local
 dc() { docker compose --env-file "$ENV" -f ops/staging/docker-compose.staging.yml "$@"; }
 val() { grep -m1 "^$1=" "$ENV" | cut -d= -f2-; }

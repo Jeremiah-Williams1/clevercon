@@ -1,0 +1,27 @@
+name: promotion-guard
+
+# Changes only move up: infra/main (dev) -> infra/staging -> infra/prod. A PR that
+# would move code down (for example infra/staging into infra/main) fails this check.
+on:
+  pull_request:
+    branches: [infra/main, infra/staging]
+
+permissions: {}
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the direction
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }} # passed via env, never pasted into the script
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          rank() { case "$1" in infra/main) echo 1;; infra/staging) echo 2;; infra/prod) echo 3;; *) echo 0;; esac; }
+          h=$(rank "$HEAD_BRANCH"); b=$(rank "$BASE_BRANCH")
+          if [ "$h" -gt "$b" ]; then
+            echo "::error::$HEAD_BRANCH must not be merged into $BASE_BRANCH. Changes only move up: main -> staging -> prod."
+            exit 1
+          fi
+          echo "ok: $HEAD_BRANCH -> $BASE_BRANCH"
