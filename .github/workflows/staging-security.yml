@@ -1,0 +1,96 @@
+name: staging-security
+
+# Runs on every PR into, and push to, the staging and prod branches. Uses no secrets
+# and no AWS access. His own CI (ci.yml) only runs for `main`, so nothing overlaps.
+on:
+  pull_request:
+    branches: [infra/staging, infra/prod]
+  push:
+    branches: [infra/staging, infra/prod]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the scan reads commit history, not just the latest files
+
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          V=8.18.4
+          curl -sSfL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Scan the commits in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          RANGE=""
+          if [ "$EVENT" = pull_request ]; then
+            RANGE="$PR_BASE..$PR_HEAD"
+          elif [ "${PUSH_BEFORE//0/}" != "" ]; then
+            RANGE="$PUSH_BEFORE..$SHA"
+          fi
+          echo "scanning: ${RANGE:-full history}"
+          gitleaks detect --source . --redact --no-banner --verbose ${RANGE:+--log-opts="$RANGE"}
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Our staging scripts plus the two dev scripts that reach the server.
+      - run: shellcheck -S warning ops/staging/*.sh ops/scripts/bootstrap-host.sh ops/scripts/check-contract-ids.sh
+
+  image-scan:
+    name: image-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (his Dockerfile unchanged, then our non-root layer)
+        run: |
+          docker build -t clevercon-base:local -f Dockerfile .
+          docker build -t clevercon-staging:local --build-arg BASE_IMAGE=clevercon-base:local ops/staging
+
+      - name: Trivy report (HIGH and CRITICAL; informational)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: clevercon-staging:local
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+          format: table
+
+      - name: Trivy gate (fixable CRITICAL vulnerabilities fail the check)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: clevercon-staging:local
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Contract check against Testnet (informational for now)
+        continue-on-error: true
+        run: |
+          ./ops/staging/gen-env.sh
+          ./ops/staging/check-contracts.sh
