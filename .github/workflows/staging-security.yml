@@ -70,7 +70,7 @@ jobs:
           docker build -t clevercon-staging:local --build-arg BASE_IMAGE=clevercon-base:local ops/staging
 
       - name: Trivy report (HIGH and CRITICAL; informational)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: clevercon-staging:local
           scanners: vuln,secret
@@ -80,7 +80,7 @@ jobs:
           format: table
 
       - name: Trivy gate (fixable CRITICAL vulnerabilities fail the check)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: clevercon-staging:local
           scanners: vuln
