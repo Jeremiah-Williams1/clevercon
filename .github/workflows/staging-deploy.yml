@@ -10,10 +10,11 @@ on:
         type: choice
         options: [deploy, teardown]
         default: deploy
-      run_e2e:
-        description: Also run the throwaway-wallet e2e (uses Testnet contracts)
-        type: boolean
-        default: false
+      e2e_mode:
+        description: End-to-end test to run after deploy (none skips it)
+        type: choice
+        options: [none, core, pp2, full]
+        default: none
 
 permissions:
   id-token: write # lets the job ask GitHub for an OIDC token
@@ -140,7 +141,9 @@ jobs:
             ./ops/staging/security-check.sh"
 
       - name: e2e (throwaway wallets)
-        if: inputs.action == 'deploy' && inputs.run_e2e
+        if: inputs.action == 'deploy' && inputs.e2e_mode != 'none'
+        env:
+          E2E_MODE: ${{ inputs.e2e_mode }}
         run: |
           . "$RUNNER_TEMP/remote.sh"
-          remote "cd ~/clevercon && ./ops/staging/e2e.sh"
+          remote "cd ~/clevercon && E2E_MODE=$E2E_MODE ./ops/staging/e2e.sh"
