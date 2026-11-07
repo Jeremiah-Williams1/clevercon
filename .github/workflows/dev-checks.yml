@@ -1,0 +1,118 @@
+name: dev-checks
+
+# Checks for the dev branch (infra/main). Uses no secrets and no AWS access.
+# His own ci.yml only runs for `main`, so none of this duplicates it.
+on:
+  pull_request:
+    branches: [infra/main]
+  push:
+    branches: [infra/main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the scan reads commit history, not just the latest files
+
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          V=8.18.4
+          curl -sSfL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Scan the commits in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          RANGE=""
+          if [ "$EVENT" = pull_request ]; then
+            RANGE="$PR_BASE..$PR_HEAD"
+          elif [ "${PUSH_BEFORE//0/}" != "" ]; then
+            RANGE="$PUSH_BEFORE..$SHA"
+          fi
+          echo "scanning: ${RANGE:-full history}"
+          gitleaks detect --source . --redact --no-banner --verbose ${RANGE:+--log-opts="$RANGE"}
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint every shell script under ops/
+        run: git ls-files -z -- 'ops/*.sh' | xargs -0 --no-run-if-empty shellcheck -S warning
+
+  packages:
+    name: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the SDK, then the MCP server (the MCP needs the SDK's output)
+        run: |
+          npm run build -w @clevercon/agent-sdk
+          npm run build -w @clevercon/mcp
+
+      - name: SDK unit tests
+        run: npx vitest run packages/agent-sdk
+
+      - name: MCP smoke test (starts the real server and lists its tools)
+        run: npm test -w @clevercon/mcp
+
+      - name: Check what would be published (only built files, README, package.json, LICENSE)
+        run: |
+          npm pack --dry-run --json -w @clevercon/agent-sdk -w @clevercon/mcp > pack.json
+          jq -r '.[] | .name + "@" + .version + ": " + (.files | length | tostring) + " files"' pack.json
+          bad=$(jq -r '.[] | .name as $n | .files[].path | select(test("^(dist/|README\\.md$|package\\.json$|LICENSE(\\..*)?$)") | not) | $n + ": " + .' pack.json)
+          if [ -n "$bad" ]; then
+            echo "unexpected files would be published:"; echo "$bad"; exit 1
+          fi
+
+      # Upstream's own repo-wide checks. Informational: typecheck and format are red upstream today.
+      - name: Typecheck (informational)
+        id: typecheck
+        continue-on-error: true
+        run: npm run typecheck
+      - name: Lint (informational)
+        id: lint
+        continue-on-error: true
+        run: npm run lint
+      - name: Format check (informational)
+        id: format
+        continue-on-error: true
+        run: npm run format:check
+
+      - name: Summary of the informational checks
+        if: always()
+        run: |
+          {
+            echo "### Upstream checks (informational)"
+            echo "| check | result |"
+            echo "|---|---|"
+            echo "| typecheck | ${{ steps.typecheck.outcome }} |"
+            echo "| lint | ${{ steps.lint.outcome }} |"
+            echo "| format | ${{ steps.format.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
