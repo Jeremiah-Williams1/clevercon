@@ -1,0 +1,146 @@
+name: staging-deploy
+
+# Manual only. Needs the "staging" Environment (required reviewer) and the AWS role
+# whose trust rule accepts only that Environment.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: deploy, or teardown (terminates the instance)
+        type: choice
+        options: [deploy, teardown]
+        default: deploy
+      run_e2e:
+        description: Also run the throwaway-wallet e2e (uses Testnet contracts)
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write # lets the job ask GitHub for an OIDC token
+  contents: read
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 60
+    env:
+      NAME: clevercon-staging
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Helper to run commands on the instance
+        run: |
+          cat > "$RUNNER_TEMP/remote.sh" <<'HELPER'
+          # usage: remote "<script run as the ubuntu user>"  (fails if the script fails)
+          remote() {
+            local cmd id s
+            cmd="echo $(printf %s "set -euo pipefail; $1" | base64 -w0) | base64 -d | sudo -u ubuntu -H bash -l"
+            id=$(aws ssm send-command --instance-ids "$ID" --document-name AWS-RunShellScript \
+              --parameters "$(jq -n --arg c "$cmd" '{commands:[$c],executionTimeout:["3000"]}')" \
+              --query Command.CommandId --output text)
+            while :; do
+              s=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+                    --query Status --output text 2>/dev/null || echo Pending)
+              case "$s" in Success|Failed|Cancelled|TimedOut) break;; esac
+              sleep 10
+            done
+            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+              --query StandardOutputContent --output text | tail -n 60
+            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+              --query StandardErrorContent --output text | tail -n 20 >&2
+            [ "$s" = Success ]
+          }
+          HELPER
+
+      - name: Find the instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId | [0]' --output text)
+          [ "$ID" = "None" ] && ID=""
+          echo "ID=$ID" >> "$GITHUB_ENV"
+          echo "existing instance: ${ID:-none}"
+
+      - name: Teardown
+        if: inputs.action == 'teardown'
+        run: |
+          [ -n "$ID" ] || { echo "nothing to tear down"; exit 0; }
+          aws ec2 terminate-instances --instance-ids "$ID" --query 'TerminatingInstances[].CurrentState.Name' --output text
+
+      - name: Launch the instance if there is none
+        if: inputs.action == 'deploy'
+        run: |
+          if [ -z "$ID" ]; then
+            AMI=$(aws ssm get-parameter --query Parameter.Value --output text \
+              --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id)
+            SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=clevercon-staging \
+              --query 'SecurityGroups[0].GroupId' --output text)
+            TAGS="Tags=[{Key=Name,Value=$NAME},{Key=project,Value=clevercon}]"
+            ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type t3.large \
+              --security-group-ids "$SG" --iam-instance-profile Name=clevercon-staging-ec2 \
+              --metadata-options HttpTokens=required,HttpEndpoint=enabled \
+              --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=40,VolumeType=gp3,Encrypted=true}' \
+              --user-data file://ops/scripts/bootstrap-host.sh \
+              --tag-specifications "ResourceType=instance,$TAGS" "ResourceType=volume,$TAGS" \
+              --query 'Instances[0].InstanceId' --output text)
+            echo "ID=$ID" >> "$GITHUB_ENV"
+            echo "launched $ID"
+          else
+            aws ec2 start-instances --instance-ids "$ID" >/dev/null   # no-op if already running
+          fi
+          aws ec2 wait instance-running --instance-ids "$ID"
+
+      - name: Wait for SSM and the bootstrap
+        if: inputs.action == 'deploy'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          for i in $(seq 1 40); do
+            p=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" \
+                  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            [ "$p" = "Online" ] && break; sleep 15
+          done
+          [ "$p" = "Online" ] || { echo "instance never came online in SSM"; exit 1; }
+          for i in $(seq 1 40); do
+            remote "grep -q 'BOOTSTRAP DONE' /var/log/cloud-init-output.log && test -d ~/clevercon/.git" && break
+            sleep 15
+          done
+          remote "test -d ~/clevercon/.git"
+
+      - name: Deploy this commit
+        if: inputs.action == 'deploy'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          remote "
+            cd ~/clevercon
+            git fetch --quiet origin $SHA
+            git checkout --quiet --force $SHA
+            [ -f ops/staging/.env.staging ] || ./ops/staging/gen-env.sh
+            ./ops/staging/build.sh
+            ./ops/staging/up.sh"
+
+      - name: Smoke test and security check
+        if: inputs.action == 'deploy'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          remote "
+            cd ~/clevercon
+            curl -fsS localhost:4100/health; echo
+            curl -sS localhost:4100/ready; echo
+            ./ops/staging/security-check.sh"
+
+      - name: e2e (throwaway wallets)
+        if: inputs.action == 'deploy' && inputs.run_e2e
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          remote "cd ~/clevercon && ./ops/staging/e2e.sh"
