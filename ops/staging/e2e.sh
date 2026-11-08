@@ -43,17 +43,38 @@ if [ "${E2E_MODE:-core}" = pp2 ]; then
   set +e
   docker rm -f clevercon-e2e-pp2 >/dev/null 2>&1
   # timeout: proving normally takes about a minute; give up after 20 minutes instead of hanging
+  # His script prints "N/N stages passed" but then never exits (the proving workers keep node alive),
+  # so we watch the output: once the summary line appears, stop the container and judge by that line.
+  LOG="$(mktemp)"
   timeout 1200 docker run --rm --name clevercon-e2e-pp2 --network clevercon-staging_default --memory 3g \
     -v "$W:/app/wallets.json" -v "$A:/artifacts:ro" \
     -e API_URL=http://api:4100 \
     -e PP2_WASM=/artifacts/policy_batch.wasm -e PP2_ZKEY=/artifacts/policy_batch_final.zkey \
     -e E2E_SKIP_PP1=1 -e NODE_OPTIONS=--max-old-space-size=2560 \
     clevercon-staging:local npx tsx scripts/e2e-pp2-live.ts 2>&1 \
-    | sed -E 's/S[A-Z2-7]{55}/[hidden-secret]/g'
-  rc=${PIPESTATUS[0]}
+    | sed -u -E 's/S[A-Z2-7]{55}/[hidden-secret]/g' | tee "$LOG" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if grep -Eq '[0-9]+/[0-9]+ stages passed' "$LOG"; then
+      sleep 15
+      echo "(summary printed; stopping the test container, which would otherwise not exit)"
+      docker stop -t 5 clevercon-e2e-pp2 >/dev/null 2>&1
+      break
+    fi
+    sleep 5
+  done
+  wait "$pid"
   docker rm -f clevercon-e2e-pp2 >/dev/null 2>&1
-  [ "$rc" = 124 ] && echo "pp2 e2e timed out after 20 minutes" >&2
-  exit "$rc"
+  summary="$(grep -Eo '[0-9]+/[0-9]+ stages passed' "$LOG" | tail -n 1)"
+  rm -f "$LOG"
+  if [ -z "$summary" ]; then
+    echo "pp2 e2e did not finish (no summary line; timed out after 20 minutes or crashed)" >&2
+    exit 1
+  fi
+  done_n="${summary%%/*}"; rest="${summary#*/}"; total_n="${rest%% *}"
+  [ "$done_n" = "$total_n" ] || { echo "pp2 e2e FAILED: $summary" >&2; exit 1; }
+  echo "pp2 e2e OK: $summary"
+  exit 0
 fi
 
 SRC=scripts/e2e-testnet.ts
