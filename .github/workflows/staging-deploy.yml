@@ -28,13 +28,13 @@ jobs:
   staging:
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       NAME: clevercon-staging
       SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
@@ -44,11 +44,12 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/remote.sh" <<'HELPER'
           # usage: remote "<script run as the ubuntu user>"  (fails if the script fails)
+          # REMOTE_TIMEOUT (seconds, default 3000) caps how long the command may run on the host.
           remote() {
             local cmd id s
             cmd="echo $(printf %s "set -euo pipefail; $1" | base64 -w0) | base64 -d | sudo -u ubuntu -H bash -l"
             id=$(aws ssm send-command --instance-ids "$ID" --document-name AWS-RunShellScript \
-              --parameters "$(jq -n --arg c "$cmd" '{commands:[$c],executionTimeout:["3000"]}')" \
+              --parameters "$(jq -n --arg c "$cmd" --arg t "${REMOTE_TIMEOUT:-3000}" '{commands:[$c],executionTimeout:[$t]}')" \
               --query Command.CommandId --output text)
             while :; do
               s=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
@@ -142,8 +143,15 @@ jobs:
 
       - name: e2e (throwaway wallets)
         if: inputs.action == 'deploy' && inputs.e2e_mode != 'none'
+        timeout-minutes: 30
         env:
           E2E_MODE: ${{ inputs.e2e_mode }}
+          REMOTE_TIMEOUT: '1500' # seconds; the host stops the command after this
         run: |
           . "$RUNNER_TEMP/remote.sh"
           remote "cd ~/clevercon && E2E_MODE=$E2E_MODE ./ops/staging/e2e.sh"
+
+      - name: Reminder
+        if: always() && inputs.action == 'deploy'
+        run: |
+          echo "Instance ${ID:-unknown} may still be running and billing. Run this workflow again with action teardown when you are done." >> "$GITHUB_STEP_SUMMARY"

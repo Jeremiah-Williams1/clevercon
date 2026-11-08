@@ -199,7 +199,7 @@ start_services() {
   nohup npm run start -w @clevercon/workers  >"$REPORT/svc/workers.log" 2>&1 & echo $! > "$PIDS/workers.pid"
   nohup npm run start -w @clevercon/indexer  >"$REPORT/svc/indexer.log" 2>&1 & echo $! > "$PIDS/indexer.pid"
 
-  for i in $(seq 1 60); do
+  for _ in $(seq 1 60); do
     if curl -fsS http://localhost:4100/ready >"$REPORT/ready.json" 2>/dev/null; then
       echo "   /ready: $(cat "$REPORT/ready.json")"
       return 0

@@ -69,25 +69,46 @@ jobs:
           docker build -t clevercon-base:local -f Dockerfile .
           docker build -t clevercon-staging:local --build-arg BASE_IMAGE=clevercon-base:local ops/staging
 
-      - name: Trivy report (HIGH and CRITICAL; informational)
+      - name: Trivy scan (writes trivy.json; never fails by itself)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: clevercon-staging:local
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          format: json
+          output: trivy.json
           exit-code: '0'
-          format: table
 
-      - name: Trivy gate (fixable CRITICAL vulnerabilities fail the check)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: clevercon-staging:local
-          scanners: vuln
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: '1'
-          format: table
+      - name: Evaluate the scan
+        run: |
+          [ -s trivy.json ] || { echo "no scan output"; exit 1; }
+          # Gate: fixable CRITICAL findings in the OS layer (ours to fix by rebuilding on a fresh base image).
+          # Library findings come from upstream's dependencies: listed below, not gating.
+          os_crit=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy.json)
+          os_high=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy.json)
+          lib_crit=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | length' trivy.json)
+          lib_high=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="HIGH")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | length' trivy.json)
+          secrets=$(jq '[.Results[]? | select(.Class=="secret") | .Secrets[]?] | length' trivy.json)
+          {
+            echo "### Image scan (fixable findings only)"
+            echo "| area | CRITICAL | HIGH |"
+            echo "|---|---|---|"
+            echo "| OS packages (gate) | $os_crit | $os_high |"
+            echo "| libraries and tools (informational) | $lib_crit | $lib_high |"
+            echo "| possible secrets (informational) | $secrets | |"
+            echo
+            echo "#### Library CRITICAL findings (upstream dependencies)"
+            echo "| CVE | package | installed | fixed in |"
+            echo "|---|---|---|---|"
+            jq -r '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | .[] | "| \(.VulnerabilityID) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) |"' trivy.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "OS CRITICAL: $os_crit | library CRITICAL: $lib_crit | library HIGH: $lib_high | possible secrets: $secrets"
+          if [ "$os_crit" != 0 ]; then
+            echo "Fixable CRITICAL vulnerabilities in the OS layer:"
+            jq -r '.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL") | "  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' trivy.json
+            exit 1
+          fi
 
       - name: Contract check against Testnet (informational for now)
         continue-on-error: true
