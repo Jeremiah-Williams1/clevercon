@@ -116,3 +116,53 @@ jobs:
             echo "| lint | ${{ steps.lint.outcome }} |"
             echo "| format | ${{ steps.format.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Upstream's ci.yml never sets TEST_DATABASE_URL or REDIS_URL, so every *.integration.test.ts
+  # (api, indexer, workers) is skipped there. This job runs them against real Postgres and Redis.
+  services:
+    name: services (api, indexer, workers, db)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: clevercon
+          POSTGRES_PASSWORD: clevercon # throwaway database inside this job, not a real secret
+          POSTGRES_DB: clevercon
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U clevercon -d clevercon"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The tests wipe tables, so they use their own schema (cctest), as docs/development.md asks.
+      DATABASE_URL: postgresql://clevercon:clevercon@localhost:5432/clevercon?schema=cctest
+      TEST_DATABASE_URL: postgresql://clevercon:clevercon@localhost:5432/clevercon?schema=cctest
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Create the tables (db push into the cctest schema)
+        run: npx prisma db push --skip-generate --schema packages/db/prisma/schema.prisma
+
+      - name: Typecheck the backend (api, indexer, workers, db, common)
+        run: |
+          for d in packages/common packages/db services/api services/indexer services/workers; do
+            echo "==> $d"; npx tsc --noEmit -p "$d/tsconfig.json"
+          done
+
+      - name: Tests with real Postgres and Redis (unit and integration)
+        run: npx vitest run packages/db packages/common services
