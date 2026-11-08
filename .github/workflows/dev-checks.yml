@@ -155,6 +155,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Build the SDK (some tests import it from its built dist/ folder)
+        run: npm run build -w @clevercon/agent-sdk
+
       - name: Create the tables (db push into the cctest schema)
         run: npx prisma db push --skip-generate --schema packages/db/prisma/schema.prisma
 
