@@ -34,20 +34,26 @@ if [ "${E2E_MODE:-core}" = pp2 ]; then
   [ -n "$BASE" ] || { echo "could not find the artifact URL; set PP2_ARTIFACT_BASE" >&2; exit 1; }
   for f in policy_batch.wasm policy_batch_final.zkey; do
     if [ ! -s "$A/$f" ]; then
-      curl -fSL --retry 3 -o "$A/$f.part" "$BASE/$f" && mv "$A/$f.part" "$A/$f" \
-        || { echo "download failed: $BASE/$f" >&2; exit 1; }
+      echo "downloading $f ..."
+      curl -fSL --retry 3 -w '  %{size_download} bytes in %{time_total}s\n' -o "$A/$f.part" "$BASE/$f" \
+        && mv "$A/$f.part" "$A/$f" || { echo "download failed: $BASE/$f" >&2; exit 1; }
     fi
   done
   ls -lh "$A"
   set +e
-  docker run --rm --network clevercon-staging_default --memory 3g \
+  docker rm -f clevercon-e2e-pp2 >/dev/null 2>&1
+  # timeout: proving normally takes about a minute; give up after 20 minutes instead of hanging
+  timeout 1200 docker run --rm --name clevercon-e2e-pp2 --network clevercon-staging_default --memory 3g \
     -v "$W:/app/wallets.json" -v "$A:/artifacts:ro" \
     -e API_URL=http://api:4100 \
     -e PP2_WASM=/artifacts/policy_batch.wasm -e PP2_ZKEY=/artifacts/policy_batch_final.zkey \
     -e E2E_SKIP_PP1=1 -e NODE_OPTIONS=--max-old-space-size=2560 \
     clevercon-staging:local npx tsx scripts/e2e-pp2-live.ts 2>&1 \
     | sed -E 's/S[A-Z2-7]{55}/[hidden-secret]/g'
-  exit "${PIPESTATUS[0]}"
+  rc=${PIPESTATUS[0]}
+  docker rm -f clevercon-e2e-pp2 >/dev/null 2>&1
+  [ "$rc" = 124 ] && echo "pp2 e2e timed out after 20 minutes" >&2
+  exit "$rc"
 fi
 
 SRC=scripts/e2e-testnet.ts
