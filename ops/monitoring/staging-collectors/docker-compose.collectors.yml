@@ -1,0 +1,62 @@
+# Collectors that run ON the staging host. Prometheus (on the monitoring host) scrapes them over the private network.
+# Started by install.sh, which writes .env with BIND_IP (the host's private IP).
+# They listen only on that IP, never on 0.0.0.0 and never on a public address.
+# Ports: 9100 node_exporter, 9115 blackbox_exporter, 9180 cAdvisor.
+# Host networking is used so the blackbox probe can reach the API on 127.0.0.1:4100 (loopback-only port).
+name: clevercon-collectors
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: '5m', max-file: '2' }
+
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=${BIND_IP:?run install.sh first}:9100
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - /:/host:ro,rslave
+      - /var/lib/node_exporter/textfile:/textfile:ro
+    mem_limit: 64m
+    logging: *logging
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --listen_ip=${BIND_IP:?run install.sh first}
+      - --port=9180
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      # Expose only the compose labels, so alerts can say "service=api" instead of a container hash.
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+      - --disable_metrics=advtcp,cpu_topology,hugetlb,memory_numa,percpu,referenced_memory,resctrl,sched,tcp,udp
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    mem_limit: 256m
+    logging: *logging
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.27.0
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+      - --web.listen-address=${BIND_IP:?run install.sh first}:9115
+    volumes:
+      - ./blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    mem_limit: 64m
+    logging: *logging

@@ -1,0 +1,73 @@
+# Prometheus config. The staging host is ephemeral, so it is not listed here: its private IP is
+# written to targets/staging.json by register-target.sh (file_sd). Remove the file on teardown and
+# the series disappear without a "host down" alert.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # The monitoring stack itself.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['alertmanager:9093']
+  - job_name: grafana
+    static_configs:
+      - targets: ['grafana:3000']
+
+  # Staging host. targets/staging.json holds one entry: the private IP, no port.
+  # Each job below adds the port of the exporter it talks to.
+  - job_name: staging_node
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/staging.json']
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __address__
+        replacement: '$1:9100'
+
+  - job_name: staging_cadvisor
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/staging.json']
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __address__
+        replacement: '$1:9180'
+
+  # Probes run by blackbox_exporter ON the staging host, so "127.0.0.1" means staging itself.
+  - job_name: api_health
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+      target: ['http://127.0.0.1:4100/health']
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/staging.json']
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __address__
+        replacement: '$1:9115'
+
+  - job_name: api_ready
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+      target: ['http://127.0.0.1:4100/ready']
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/staging.json']
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __address__
+        replacement: '$1:9115'

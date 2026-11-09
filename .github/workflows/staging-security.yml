@@ -55,7 +55,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Our staging scripts plus the two dev scripts that reach the server.
-      - run: shellcheck -S warning ops/staging/*.sh ops/scripts/bootstrap-host.sh ops/scripts/check-contract-ids.sh
+      - run: shellcheck -S warning ops/staging/*.sh ops/scripts/bootstrap-host.sh ops/scripts/check-contract-ids.sh ops/monitoring/*.sh ops/monitoring/staging-collectors/*.sh
+
+  prometheus-rules:
+    name: prometheus-rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install promtool (checksum-pinned)
+        run: |
+          V=3.5.0
+          curl -sSfL -o prom.tgz "https://github.com/prometheus/prometheus/releases/download/v${V}/prometheus-${V}.linux-amd64.tar.gz"
+          echo "e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a  prom.tgz" | sha256sum -c -
+          tar -xzf prom.tgz --strip-components=1 "prometheus-${V}.linux-amd64/promtool"
+          sudo mv promtool /usr/local/bin/
+
+      - name: Check and test the alert rules
+        working-directory: ops/monitoring/prometheus
+        run: |
+          promtool check rules rules/clevercon.yml
+          promtool test rules tests/clevercon.test.yml
 
   image-scan:
     name: image-scan

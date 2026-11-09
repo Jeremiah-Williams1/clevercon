@@ -1,0 +1,6 @@
+[
+  {
+    "targets": ["10.0.1.23"],
+    "labels": { "env": "staging", "host": "clevercon-staging" }
+  }
+]

@@ -1,0 +1,5 @@
+# Secrets and per-host state never go into git.
+secrets/
+prometheus/targets/*.json
+!prometheus/targets/*.example.json
+staging-collectors/.env
