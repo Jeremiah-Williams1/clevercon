@@ -1,0 +1,156 @@
+# Unit tests for the alert rules. Run from ops/monitoring/prometheus:
+#   promtool test rules tests/clevercon.test.yml
+rule_files:
+  - ../rules/clevercon.yml
+evaluation_interval: 30s
+
+tests:
+  # API process down: fires after 2 minutes, not before.
+  - interval: 30s
+    input_series:
+      - series: 'probe_success{job="api_health", instance="10.0.1.23:9115", host="clevercon-staging"}'
+        values: '1x4 0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ApiDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ApiDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: api_health
+              instance: 10.0.1.23:9115
+              host: clevercon-staging
+            exp_annotations:
+              summary: 'API /health is failing on 10.0.1.23:9115 (process down or not answering).'
+
+  # Indexer stops saving its cursor: age keeps growing past 120 s.
+  - interval: 30s
+    input_series:
+      - series: 'clevercon_indexer_state_age_seconds{stream="events"}'
+        values: '3 4 5 130 160 190 220 250 280 310'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: IndexerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: IndexerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              stream: events
+            exp_annotations:
+              summary: 'Indexer stream "events" has not saved its cursor for 5m 10s.'
+
+  # Healthy indexer never alerts.
+  - interval: 30s
+    input_series:
+      - series: 'clevercon_indexer_state_age_seconds{stream="events"}'
+        values: '2 3 4 2 3 4 2 3 4 2 3 4'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: IndexerHeartbeatStale
+        exp_alerts: []
+
+  # RPC unreachable for more than 3 minutes.
+  - interval: 30s
+    input_series:
+      - series: 'clevercon_rpc_up'
+        values: '1x4 0x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RpcUnreachable
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RpcUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Stellar RPC does not answer from the staging host. The API still reports ready (RPC down only means "degraded"), so this is the only alert for it.'
+
+  # metrics.sh stopped writing: the file is 10 minutes old.
+  - interval: 30s
+    input_series:
+      - series: 'node_textfile_mtime_seconds{file="clevercon.prom"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MetricsScriptStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              file: clevercon.prom
+            exp_annotations:
+              summary: 'metrics.sh on staging has not written its file for 10m 0s. Indexer, RPC and vault alerts are blind.'
+
+  # Container disappears (api present for 2 min, then gone).
+  - interval: 30s
+    input_series:
+      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="api"}'
+        values: '1x4'
+      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="workers"}'
+        values: '1x40'
+      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="indexer"}'
+        values: '1x40'
+      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="postgres"}'
+        values: '1x40'
+      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="redis"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ContainerMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              container_label_com_docker_compose_project: clevercon-staging
+              container_label_com_docker_compose_service: api
+            exp_annotations:
+              summary: 'Container "api" is not running on staging.'
+
+  # An exporter or host is gone: TargetDown fires after 3 minutes.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="staging_node", instance="10.0.1.23:9100", host="clevercon-staging"}'
+        values: '1x4 0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: staging_node
+              instance: 10.0.1.23:9100
+              host: clevercon-staging
+            exp_annotations:
+              summary: 'Cannot scrape staging_node on 10.0.1.23:9100 for 3 minutes (host or exporter down).'
+
+  # Vault: 2 days left is critical, 10 days is only a warning.
+  - interval: 1m
+    input_series:
+      - series: 'clevercon_vault_days_left'
+        values: '2x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VaultTtlLow
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Vault contract instance expires in 2.0 days. Extend its TTL.'
+  - interval: 1m
+    input_series:
+      - series: 'clevercon_vault_days_left'
+        values: '10x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: VaultTtlLow
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: VaultTtlGettingLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Vault contract instance expires in 10.0 days.'

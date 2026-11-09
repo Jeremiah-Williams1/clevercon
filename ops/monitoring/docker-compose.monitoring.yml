@@ -1,0 +1,73 @@
+# Monitoring host: Prometheus, Alertmanager, Grafana. Runs the same on EC2 or a VPS.
+# Run from ops/monitoring/:
+#   docker compose -f docker-compose.monitoring.yml up -d
+# Secrets (never committed, see ops/docs/monitoring.md):
+#   secrets/slack_url              Slack incoming-webhook URL
+#   secrets/grafana_admin_password Grafana admin password
+# Everything listens on loopback only; reach the UIs with an SSM port forward (or an SSH tunnel on a VPS).
+name: clevercon-monitoring
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: '10m', max-file: '3' }
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle # lets register-target.sh reload without a restart
+    ports:
+      - '127.0.0.1:9090:9090'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - promdata:/prometheus
+    mem_limit: 768m
+    logging: *logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - '127.0.0.1:9093:9093'
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets/slack_url:/etc/alertmanager/slack_url:ro
+      - amdata:/alertmanager
+    mem_limit: 128m
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+    ports:
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - ./secrets/grafana_admin_password:/run/secrets/grafana_admin_password:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+    mem_limit: 384m
+    logging: *logging
+
+volumes:
+  promdata:
+  amdata:
+  grafanadata:
