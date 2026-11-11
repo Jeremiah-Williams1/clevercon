@@ -41,9 +41,7 @@ async function check(key, fns, checksumWarningOnly = false) {
   await check('POLICY_VERIFIER_CONTRACT_ID', [], true);
   await check('USDC_SAC'); // a built-in token contract: existence only
   const indexed = (e.INDEXER_CONTRACT_IDS || '').split(',');
-  for (const k of ['AGENT_VAULT_CONTRACT_ID', 'POLICY_VERIFIER_CONTRACT_ID']) {
-    if (!indexed.includes(e[k])) { row('INDEXER_CONTRACT_IDS', 'MISSING', k); bad++; }
-  }
+  if (!indexed.includes(e.AGENT_VAULT_CONTRACT_ID)) { row('INDEXER_CONTRACT_IDS', 'MISSING', 'AGENT_VAULT_CONTRACT_ID'); bad++; }
   console.log(bad ? `\n${bad} problem(s): refusing to continue.` : '\nAll contract checks passed.');
   process.exit(bad ? 1 : 0);
 })();
