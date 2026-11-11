@@ -97,6 +97,15 @@ services:
     init: true
     working_dir: /app/apps/web
     command: ['../../node_modules/.bin/vite', '--host', '0.0.0.0', '--port', '5173']
+    tmpfs:
+      - /app/apps/web/node_modules/.vite:uid=1000,gid=1000
+      - /app/node_modules/.vite:uid=1000,gid=1000
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:5173/").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     environment:
       NODE_ENV: development
       VITE_NETWORK: testnet
