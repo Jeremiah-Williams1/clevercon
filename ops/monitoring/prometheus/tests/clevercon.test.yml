@@ -85,29 +85,39 @@ tests:
             exp_annotations:
               summary: 'metrics.sh on staging has not written its file for 10m 0s. Indexer, RPC and vault alerts are blind.'
 
-  # Container disappears (api present for 2 min, then gone).
+  # A container stops (api runs for 2 min, then 0); redis stays up.
   - interval: 30s
     input_series:
-      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="api"}'
-        values: '1x4'
-      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="workers"}'
-        values: '1x40'
-      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="indexer"}'
-        values: '1x40'
-      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="postgres"}'
-        values: '1x40'
-      - series: 'container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="redis"}'
-        values: '1x40'
+      - series: 'clevercon_container_running{service="api"}'
+        values: '1x4 0x20'
+      - series: 'clevercon_container_running{service="redis"}'
+        values: '1x24'
     alert_rule_test:
       - eval_time: 9m
-        alertname: ContainerMissing
+        alertname: ContainerNotRunning
         exp_alerts:
           - exp_labels:
               severity: critical
-              container_label_com_docker_compose_project: clevercon-staging
-              container_label_com_docker_compose_service: api
+              service: api
             exp_annotations:
               summary: 'Container "api" is not running on staging.'
+
+  # A container restarts four times in a few minutes; a stable one does not alert.
+  - interval: 1m
+    input_series:
+      - series: 'clevercon_container_restarts_total{service="indexer"}'
+        values: '0 0 0 1 2 3 4 4 4 4'
+      - series: 'clevercon_container_restarts_total{service="api"}'
+        values: '0x9'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ContainerRestarting
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: indexer
+            exp_annotations:
+              summary: 'Container "indexer" restarted more than twice in 15 minutes.'
 
   # An exporter or host is gone: TargetDown fires after 3 minutes.
   - interval: 30s

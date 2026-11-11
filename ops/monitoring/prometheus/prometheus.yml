@@ -36,15 +36,6 @@ scrape_configs:
         target_label: __address__
         replacement: '$1:9100'
 
-  - job_name: staging_cadvisor
-    file_sd_configs:
-      - files: ['/etc/prometheus/targets/staging.json']
-        refresh_interval: 30s
-    relabel_configs:
-      - source_labels: [__address__]
-        target_label: __address__
-        replacement: '$1:9180'
-
   # Probes run by blackbox_exporter ON the staging host, so "127.0.0.1" means staging itself.
   - job_name: api_health
     metrics_path: /probe

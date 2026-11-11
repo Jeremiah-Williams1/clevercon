@@ -24,26 +24,19 @@ groups:
         annotations:
           summary: 'API /ready is failing on {{ $labels.instance }} (Postgres or Redis unreachable from the API).'
 
-      - alert: ContainerMissing
-        # absent_over_time keeps the matcher as a label, so the message can name the service.
-        expr: |
-          absent_over_time(container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="api"}[3m])
-          or absent_over_time(container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="workers"}[3m])
-          or absent_over_time(container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="indexer"}[3m])
-          or absent_over_time(container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="postgres"}[3m])
-          or absent_over_time(container_last_seen{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service="redis"}[3m])
-        for: 1m
+      - alert: ContainerNotRunning
+        expr: clevercon_container_running == 0
+        for: 2m
         labels: { severity: critical }
         annotations:
-          summary: 'Container "{{ $labels.container_label_com_docker_compose_service }}" is not running on staging.'
+          summary: 'Container "{{ $labels.service }}" is not running on staging.'
 
       - alert: ContainerRestarting
-        expr: |
-          changes(container_start_time_seconds{container_label_com_docker_compose_project="clevercon-staging",container_label_com_docker_compose_service=~"api|workers|indexer|postgres|redis"}[15m]) > 2
+        expr: increase(clevercon_container_restarts_total[15m]) > 2
         labels: { severity: critical }
         annotations:
-          summary: 'Container "{{ $labels.container_label_com_docker_compose_service }}" restarted more than twice in 15 minutes.'
-
+          summary: 'Container "{{ $labels.service }}" restarted more than twice in 15 minutes.'
+    
   - name: clevercon-chain-and-jobs
     rules:
       - alert: IndexerHeartbeatStale
