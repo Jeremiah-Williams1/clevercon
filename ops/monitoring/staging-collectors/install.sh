@@ -7,7 +7,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(git -C "$HERE" rev-parse --show-toplevel)"
-RUN_USER="${SUDO_USER:-$(id -un)}"
+RUN_USER="${RUN_USER:-$(stat -c %U "$ROOT")}"   # the user that owns the repo (SUDO_USER would be ssm-user under `sudo -iu`)
 
 detect_ip() {
   local token ip
