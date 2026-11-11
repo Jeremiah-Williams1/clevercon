@@ -9,14 +9,14 @@ fail=0
 pass() { echo "PASS  $*"; }; bad() { echo "FAIL  $*"; fail=1; }; warn() { echo "WARN  $*"; }
 
 # 1. Only loopback listeners. Allowed besides loopback: ssh :22 (warning; the security group must block it) and the
-#    monitoring exporters (9100, 9115, 9180), but only on the private IP that install.sh recorded in
+#    monitoring exporters (9100, 9115), but only on the private IP that install.sh recorded in
 #    ops/monitoring/staging-collectors/.env. The same ports on 0.0.0.0 or any other address still fail.
 open=$(ss -ltnH | awk '{print $4}' | grep -vE '^(127\.|\[::1\])' || true)
 other=$(echo "$open" | grep -vE ':22$' || true)
 bind_ip=$(grep -m1 '^BIND_IP=' ops/monitoring/staging-collectors/.env 2>/dev/null | cut -d= -f2- || true)
 [[ "$bind_ip" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9.]+$ ]] || bind_ip=""   # private addresses only
 if [ -n "$bind_ip" ]; then
-  exp_re="^${bind_ip//./\\.}:(9100|9115|9180)$"
+  exp_re="^${bind_ip//./\\.}:(9100|9115)$"
   exporters=$(echo "$other" | grep -E "$exp_re" || true)
   other=$(echo "$other" | grep -vE "$exp_re" || true)
   [ -n "$exporters" ] && pass "monitoring exporters only on $bind_ip: $(echo $exporters)"

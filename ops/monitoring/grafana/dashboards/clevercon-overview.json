@@ -424,7 +424,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Container memory (MiB)",
+      "title": "Containers running (1 = up)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -438,8 +438,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "container_memory_working_set_bytes{container_label_com_docker_compose_project=\"clevercon-staging\",container_label_com_docker_compose_service!=\"\"} / 1048576",
-          "legendFormat": "{{container_label_com_docker_compose_service}}"
+          "expr": "clevercon_container_running",
+          "legendFormat": "{{service}}"
         }
       ],
       "fieldConfig": {
@@ -458,7 +458,7 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Container CPU (cores)",
+      "title": "Container restarts (last hour)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -472,8 +472,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"clevercon-staging\",container_label_com_docker_compose_service!=\"\"}[2m])",
-          "legendFormat": "{{container_label_com_docker_compose_service}}"
+          "expr": "increase(clevercon_container_restarts_total[1h])",
+          "legendFormat": "{{service}}"
         }
       ],
       "fieldConfig": {

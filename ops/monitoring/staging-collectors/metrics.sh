@@ -116,6 +116,38 @@ if [ "$vault_ok" = 1 ] && [ -s "$cache" ]; then
   emit "clevercon_vault_days_left $(cat "$cache")"
 fi
 
+# 5. Containers. cAdvisor cannot read Docker 29's containerd image store, so we ask Docker directly.
+# Matched by compose labels; one-off `compose run` containers (the e2e) are ignored.
+run_l=""; rst_l=""; sta_l=""; oom_l=""
+for svc in api workers indexer postgres redis web; do
+  cid=$(docker ps -aq --filter label=com.docker.compose.project=clevercon-staging \
+    --filter "label=com.docker.compose.service=$svc" --filter label=com.docker.compose.oneoff=False 2>/dev/null | head -1)
+  running=0; restarts=0; started=0; oom=0
+  if [ -n "$cid" ]; then
+    read -r r n s o < <(docker inspect -f '{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}} {{.State.OOMKilled}}' "$cid" 2>/dev/null || true)
+    [ "${r:-}" = true ] && running=1
+    restarts=${n:-0}
+    [ -n "${s:-}" ] && started=$(date -d "$s" +%s 2>/dev/null || echo 0)
+    [ "${o:-}" = true ] && oom=1
+  fi
+  run_l+="clevercon_container_running{service=\"$svc\"} $running"$'\n'
+  rst_l+="clevercon_container_restarts_total{service=\"$svc\"} $restarts"$'\n'
+  sta_l+="clevercon_container_started_timestamp_seconds{service=\"$svc\"} $started"$'\n'
+  oom_l+="clevercon_container_oom_killed{service=\"$svc\"} $oom"$'\n'
+done
+emit '# HELP clevercon_container_running 1 if the compose service container is running (0 if stopped or missing).'
+emit '# TYPE clevercon_container_running gauge'
+printf '%s' "$run_l" >>"$tmp"
+emit '# HELP clevercon_container_restarts_total Docker restart count of the service container.'
+emit '# TYPE clevercon_container_restarts_total counter'
+printf '%s' "$rst_l" >>"$tmp"
+emit '# HELP clevercon_container_started_timestamp_seconds Unix time the container last started.'
+emit '# TYPE clevercon_container_started_timestamp_seconds gauge'
+printf '%s' "$sta_l" >>"$tmp"
+emit '# HELP clevercon_container_oom_killed 1 if the last stop was an out-of-memory kill.'
+emit '# TYPE clevercon_container_oom_killed gauge'
+printf '%s' "$oom_l" >>"$tmp"
+
 emit '# HELP clevercon_metrics_last_run_timestamp_seconds Unix time of the last metrics.sh run.'
 emit '# TYPE clevercon_metrics_last_run_timestamp_seconds gauge'
 emit "clevercon_metrics_last_run_timestamp_seconds $now"
