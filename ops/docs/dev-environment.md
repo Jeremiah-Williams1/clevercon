@@ -71,12 +71,12 @@ P=<policy verifier id>
 sed -i "s|^AGENT_VAULT_CONTRACT_ID=.*|AGENT_VAULT_CONTRACT_ID=$V|" .env
 sed -i "s|^POLICY_VERIFIER_CONTRACT_ID=.*|POLICY_VERIFIER_CONTRACT_ID=$P|" .env
 grep -q '^INDEXER_CONTRACT_IDS=' .env \
-  && sed -i "s|^INDEXER_CONTRACT_IDS=.*|INDEXER_CONTRACT_IDS=$V,$P|" .env \
+  && sed -i "s|^INDEXER_CONTRACT_IDS=.*|INDEXER_CONTRACT_IDS=$V|" .env \
   || echo "INDEXER_CONTRACT_IDS=$V,$P" >> .env
 ./ops/scripts/check-contract-ids.sh
 ```
 
-`INDEXER_CONTRACT_IDS` is required by the indexer and is a comma-separated list of the contracts it should watch. The check script validates each ID's built-in checksum, so a mistyped character shows as `INVALID`. Every line must say `OK` before you continue.
+Put only the vault ID in this list: the indexer watches the vault (confirmed by the maintainer). The verifier ID is still needed by the API, but not by the indexer.
 
 ## 6. Prepare the web app configuration
 
