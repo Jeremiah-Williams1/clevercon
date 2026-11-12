@@ -47,6 +47,18 @@ jobs:
           echo "ID=$ID" >> "$GITHUB_ENV"
           echo "existing monitoring host: ${ID:-none}"
 
+      - name: Check the secrets
+        if: inputs.action == 'deploy'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.MONITORING_SLACK_WEBHOOK }}
+          GRAFANA_PASSWORD: ${{ secrets.MONITORING_GRAFANA_PASSWORD }}
+        run: |
+          case "$SLACK_WEBHOOK" in
+            https://hooks.slack.com/services/*) ;;
+            *) echo "::error::Environment secret MONITORING_SLACK_WEBHOOK is missing or is not a Slack webhook URL"; exit 1 ;;
+          esac
+          [ "${#GRAFANA_PASSWORD}" -ge 8 ] || { echo "::error::Environment secret MONITORING_GRAFANA_PASSWORD is missing or shorter than 8 characters"; exit 1; }
+
       - name: Stop
         if: inputs.action == 'stop'
         run: |
@@ -128,19 +140,20 @@ jobs:
 
       - name: Put this commit on the host and start the stack
         if: inputs.action == 'deploy'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.MONITORING_SLACK_WEBHOOK }}
+          GRAFANA_PASSWORD: ${{ secrets.MONITORING_GRAFANA_PASSWORD }}
         run: |
           . "$RUNNER_TEMP/remote.sh"
+          SLACK_B64=$(printf %s "$SLACK_WEBHOOK" | base64 -w0)
+          GRAFANA_B64=$(printf %s "$GRAFANA_PASSWORD" | base64 -w0)
+          echo "::add-mask::$SLACK_B64"
+          echo "::add-mask::$GRAFANA_B64"
           remote "
             cd ~/clevercon
             git fetch --quiet origin $SHA
             git checkout --quiet --force $SHA
-            cd ops/monitoring
-            bash setup-secrets.sh
-            docker compose -f docker-compose.monitoring.yml up -d --force-recreate
-            sleep 15
-            docker compose -f docker-compose.monitoring.yml ps
-            docker compose -f docker-compose.monitoring.yml exec -T alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
-            curl -fsS localhost:9090/-/ready"
+            SLACK_B64='$SLACK_B64' GRAFANA_B64='$GRAFANA_B64' bash ops/monitoring/apply.sh"
 
       - name: Sync the staging target
         if: inputs.action == 'deploy'

@@ -56,6 +56,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: 'false'
       GF_ANALYTICS_REPORTING_ENABLED: 'false'
       GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_SERVER_ENABLE_GZIP: 'true'
     ports:
       - '127.0.0.1:3000:3000'
     volumes:
