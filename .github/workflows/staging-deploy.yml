@@ -48,18 +48,18 @@ jobs:
           remote() {
             local cmd id s
             cmd="echo $(printf %s "set -euo pipefail; $1" | base64 -w0) | base64 -d | sudo -u ubuntu -H bash -l"
-            id=$(aws ssm send-command --instance-ids "$ID" --document-name AWS-RunShellScript \
+            id=$(aws ssm send-command --instance-ids "${REMOTE_ID:-$ID}" --document-name AWS-RunShellScript \
               --parameters "$(jq -n --arg c "$cmd" --arg t "${REMOTE_TIMEOUT:-3000}" '{commands:[$c],executionTimeout:[$t]}')" \
               --query Command.CommandId --output text)
             while :; do
-              s=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+              s=$(aws ssm get-command-invocation --command-id "$id" --instance-id "${REMOTE_ID:-$ID}" \
                     --query Status --output text 2>/dev/null || echo Pending)
               case "$s" in Success|Failed|Cancelled|TimedOut) break;; esac
               sleep 10
             done
-            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+            aws ssm get-command-invocation --command-id "$id" --instance-id "${REMOTE_ID:-$ID}" \
               --query StandardOutputContent --output text | tail -n 60
-            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+            aws ssm get-command-invocation --command-id "$id" --instance-id "${REMOTE_ID:-$ID}" \
               --query StandardErrorContent --output text | tail -n 20 >&2
             [ "$s" = Success ]
           }
@@ -73,6 +73,29 @@ jobs:
           [ "$ID" = "None" ] && ID=""
           echo "ID=$ID" >> "$GITHUB_ENV"
           echo "existing instance: ${ID:-none}"
+
+      - name: Find the monitoring host (optional)
+        run: |
+          MON=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=clevercon-monitoring" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId | [0]' --output text)
+          [ "$MON" = "None" ] && MON=""
+          if [ -n "$MON" ]; then
+            p=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$MON" \
+                  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            [ "$p" = "Online" ] || { echo "::warning::monitoring host $MON is not online in SSM; skipping monitoring steps"; MON=""; }
+          else
+            echo "::warning::no running monitoring host; skipping monitoring steps. Run monitoring-deploy (start) later: it syncs the target."
+          fi
+          echo "MON_ID=$MON" >> "$GITHUB_ENV"
+
+      - name: Stop watching staging (teardown)
+        if: inputs.action == 'teardown' && env.MON_ID != ''
+        continue-on-error: true
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          export REMOTE_ID="$MON_ID"
+          remote "cd ~/clevercon && ./ops/monitoring/register-target.sh remove"
 
       - name: Teardown
         if: inputs.action == 'teardown'
@@ -131,6 +154,13 @@ jobs:
             ./ops/staging/build.sh
             ./ops/staging/up.sh"
 
+      - name: Install monitoring collectors
+        if: inputs.action == 'deploy'
+        continue-on-error: true   # monitoring never blocks a deploy
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          remote "cd ~/clevercon && ./ops/monitoring/staging-collectors/install.sh"
+
       - name: Smoke test and security check
         if: inputs.action == 'deploy'
         run: |
@@ -140,6 +170,16 @@ jobs:
             curl -fsS localhost:4100/health; echo
             curl -sS localhost:4100/ready; echo
             ./ops/staging/security-check.sh"
+
+      - name: Register staging with monitoring
+        if: inputs.action == 'deploy' && env.MON_ID != ''
+        continue-on-error: true
+        run: |
+          IP=$(aws ec2 describe-instances --instance-ids "$ID" \
+            --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+          . "$RUNNER_TEMP/remote.sh"
+          export REMOTE_ID="$MON_ID"
+          remote "cd ~/clevercon && ./ops/monitoring/register-target.sh add $IP"
 
       - name: e2e (throwaway wallets)
         if: inputs.action == 'deploy' && inputs.e2e_mode != 'none'
