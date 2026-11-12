@@ -1,0 +1,21 @@
+{{ define "clevercon.resolved" -}}
+{{- if eq .Labels.alertname "ContainerNotRunning" }}Container "{{ .Labels.service }}" is running again.
+{{- else if eq .Labels.alertname "ApiDown" }}API /health is answering again.
+{{- else if eq .Labels.alertname "ApiNotReady" }}API /ready is OK again (Postgres and Redis reachable).
+{{- else if eq .Labels.alertname "ContainerRestarting" }}Container "{{ .Labels.service }}" has stopped restarting.
+{{- else if eq .Labels.alertname "IndexerHeartbeatStale" }}Indexer is saving its cursor again.
+{{- else if eq .Labels.alertname "IndexerHeartbeatMissing" }}Indexer has saved a cursor.
+{{- else if eq .Labels.alertname "RpcUnreachable" }}Stellar RPC answers again.
+{{- else if eq .Labels.alertname "MetricsScriptStale" }}metrics.sh is writing its file again.
+{{- else if eq .Labels.alertname "TargetDown" }}{{ .Labels.job }} is reachable again.
+{{- else if eq .Labels.alertname "DiskAlmostFull" }}Disk space is back above the limit.
+{{- else if eq .Labels.alertname "VaultTtlLow" }}Vault expiry is back above 3 days.
+{{- else }}{{ .Labels.alertname }} is back to normal.
+{{- end }}
+{{- end }}
+
+{{ define "clevercon.text" -}}
+{{- range .Alerts -}}
+{{- if eq .Status "firing" }}{{ .Annotations.summary }}{{ else }}{{ template "clevercon.resolved" . }}{{ end }}
+{{ end -}}
+{{- end }}

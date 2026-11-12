@@ -1,10 +1,13 @@
 # Critical alerts go to Slack. Warnings are kept (visible in Prometheus and on the Grafana dashboard) but not sent.
 # The webhook URL is read from a file, so it never appears in git: ops/monitoring/secrets/slack_url.
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
 route:
   receiver: nobody
   group_by: [alertname]
-  group_wait: 30s
-  group_interval: 5m
+  group_wait: 10s
+  group_interval: 1m
   repeat_interval: 4h
   routes:
     - matchers: ['severity="critical"']
@@ -16,12 +19,13 @@ receivers:
     slack_configs:
       - api_url_file: /etc/alertmanager/slack_url
         send_resolved: true
+        title_link: ''
         title: '{{ if eq .Status "firing" }}:rotating_light: FIRING{{ else }}:white_check_mark: RESOLVED{{ end }}: {{ .CommonLabels.alertname }}'
-        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
+        text: '{{ template "clevercon.text" . }}'
 
 # One failure often triggers several alerts. Say only the root cause.
 inhibit_rules:
-  # If the host (or an exporter on it) is unreachable, the other staging alerts are noise.
+  # If the host (or an exporter on it) is unreachable, the other staging alerts for it are noise.
   # `host` comes from the file_sd labels, so it is the same on every staging job.
   - source_matchers: ['alertname="TargetDown"']
     target_matchers: ['alertname!="TargetDown"']
