@@ -1,0 +1,120 @@
+name: monitoring-deploy
+
+# Manual only. Controls the monitoring host (Name=clevercon-monitoring): apply this commit, start it, or stop it.
+# The host itself is launched by hand (console) and its secrets are created by hand: see ops/docs/monitoring.md.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: apply (update the stack and sync the staging target), start, or stop
+        type: choice
+        options: [apply, start, stop]
+        default: apply
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: staging # shared with staging-deploy so the two never run at the same time
+  cancel-in-progress: false
+
+jobs:
+  monitoring:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    env:
+      NAME: clevercon-monitoring
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Find the monitoring host
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId | [0]' --output text)
+          [ "$ID" != "None" ] && [ -n "$ID" ] || { echo "::error::no monitoring host found (tag Name=$NAME). Launch it from the console first."; exit 1; }
+          echo "ID=$ID" >> "$GITHUB_ENV"
+          echo "monitoring host: $ID"
+
+      - name: Stop
+        if: inputs.action == 'stop'
+        run: |
+          aws ec2 stop-instances --instance-ids "$ID" --query 'StoppingInstances[].CurrentState.Name' --output text
+          echo "Monitoring host stopping. The disk is kept and the private IP stays the same when it starts again." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start and wait for SSM
+        if: inputs.action != 'stop'
+        run: |
+          aws ec2 start-instances --instance-ids "$ID" >/dev/null   # no-op if already running
+          aws ec2 wait instance-running --instance-ids "$ID"
+          for i in $(seq 1 40); do
+            p=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" \
+                  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            [ "$p" = "Online" ] && break; sleep 15
+          done
+          [ "$p" = "Online" ] || { echo "::error::monitoring host never came online in SSM"; exit 1; }
+
+      - name: Helper to run commands on the host
+        if: inputs.action != 'stop'
+        run: |
+          cat > "$RUNNER_TEMP/remote.sh" <<'HELPER'
+          # usage: remote "<script run as the ubuntu user>"  (fails if the script fails)
+          remote() {
+            local cmd id s
+            cmd="echo $(printf %s "set -euo pipefail; $1" | base64 -w0) | base64 -d | sudo -u ubuntu -H bash -l"
+            id=$(aws ssm send-command --instance-ids "$ID" --document-name AWS-RunShellScript \
+              --parameters "$(jq -n --arg c "$cmd" --arg t "600" '{commands:[$c],executionTimeout:[$t]}')" \
+              --query Command.CommandId --output text)
+            while :; do
+              s=$(aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+                    --query Status --output text 2>/dev/null || echo Pending)
+              case "$s" in Success|Failed|Cancelled|TimedOut) break;; esac
+              sleep 5
+            done
+            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+              --query StandardOutputContent --output text | tail -n 60
+            aws ssm get-command-invocation --command-id "$id" --instance-id "$ID" \
+              --query StandardErrorContent --output text | tail -n 20 >&2
+            [ "$s" = Success ]
+          }
+          HELPER
+
+      - name: Apply this commit
+        if: inputs.action == 'apply'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          remote "
+            cd ~/clevercon
+            git fetch --quiet origin $SHA
+            git checkout --quiet --force $SHA
+            cd ops/monitoring
+            test -s secrets/slack_url || { echo 'secrets/slack_url is missing or empty'; exit 1; }
+            test -s secrets/grafana_admin_password || { echo 'secrets/grafana_admin_password is missing or empty'; exit 1; }
+            docker compose -f docker-compose.monitoring.yml up -d --force-recreate
+            sleep 15
+            docker compose -f docker-compose.monitoring.yml ps
+            docker compose -f docker-compose.monitoring.yml exec -T alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+            curl -fsS localhost:9090/-/ready"
+
+      - name: Sync the staging target
+        if: inputs.action != 'stop'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=clevercon-staging" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+          if [ "$IP" = "None" ] || [ -z "$IP" ]; then
+            remote "cd ~/clevercon && ./ops/monitoring/register-target.sh remove"
+            echo "No running staging host: target removed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            remote "cd ~/clevercon && ./ops/monitoring/register-target.sh add $IP"
+            echo "Watching staging at $IP." >> "$GITHUB_STEP_SUMMARY"
+          fi
