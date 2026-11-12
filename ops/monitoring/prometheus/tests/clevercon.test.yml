@@ -164,3 +164,30 @@ tests:
               severity: warning
             exp_annotations:
               summary: 'Vault contract instance expires in 10.0 days.'
+
+  # Host is up but there is no indexer metric at all: fires after 5 minutes.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="staging_node", instance="10.0.1.23:9100", host="clevercon-staging"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: IndexerHeartbeatMissing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: IndexerHeartbeatMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'The indexer has saved no cursor (no indexer_state row). It is probably failing; check its logs.'
+
+  # Staging removed (teardown): no staging series at all, so no alert.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="prometheus", instance="localhost:9090"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: IndexerHeartbeatMissing
+        exp_alerts: []
