@@ -6,9 +6,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REGION="${AWS_REGION:-us-east-1}"
 PREFIX="${PARAM_PREFIX:-/clevercon/monitoring}"
 
-# Ubuntu 24.04 has no awscli package; the snap is the supported install.
-command -v aws >/dev/null 2>&1 || [ -x /snap/bin/aws ] || sudo snap install aws-cli --classic >/dev/null
-AWS="$(command -v aws || echo /snap/bin/aws)"
+# Ubuntu 24.04 has no awscli package. Use AWS's own installer (no snap store needed).
+if ! command -v aws >/dev/null 2>&1; then
+  tmp="$(mktemp -d)"
+  curl -fsSL --retry 3 --retry-delay 5 "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "$tmp/awscli.zip"
+  unzip -q "$tmp/awscli.zip" -d "$tmp"
+  sudo "$tmp/aws/install" >/dev/null
+  rm -rf "$tmp"
+fi
+AWS="$(command -v aws)"
+
 
 install -d -m 700 "$HERE/secrets"
 fetch() { # <parameter name> <file name>
