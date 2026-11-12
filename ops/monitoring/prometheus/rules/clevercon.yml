@@ -12,7 +12,7 @@ groups:
 
       - alert: ApiDown
         expr: probe_success{job="api_health"} == 0
-        for: 2m
+        for: 1m
         labels: { severity: critical }
         annotations:
           summary: 'API /health is failing on {{ $labels.instance }} (process down or not answering).'
@@ -26,7 +26,7 @@ groups:
 
       - alert: ContainerNotRunning
         expr: clevercon_container_running == 0
-        for: 2m
+        for: 1m
         labels: { severity: critical }
         annotations:
           summary: 'Container "{{ $labels.service }}" is not running on staging.'

@@ -41,6 +41,7 @@ services:
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
       - ./secrets/slack_url:/etc/alertmanager/slack_url:ro
+      - ./alertmanager/templates:/etc/alertmanager/templates:ro
       - amdata:/alertmanager
     mem_limit: 128m
     logging: *logging
