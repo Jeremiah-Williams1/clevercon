@@ -36,7 +36,16 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: 'Container "{{ $labels.service }}" restarted more than twice in 15 minutes.'
-    
+      
+      - alert: IndexerHeartbeatMissing
+        # No indexer_state row at all: the age metric does not exist, so the rule above stays silent.
+        # The `and on()` part keeps it quiet when staging is not registered (after teardown).
+        expr: absent(clevercon_indexer_state_age_seconds) and on() (up{job="staging_node"} == 1)
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: 'The indexer has saved no cursor (no indexer_state row). It is probably failing; check its logs.'
+  
   - name: clevercon-chain-and-jobs
     rules:
       - alert: IndexerHeartbeatStale
