@@ -85,7 +85,7 @@ jobs:
                   --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
             [ "$p" = "Online" ] || { echo "::warning::monitoring host $MON is not online in SSM; skipping monitoring steps"; MON=""; }
           else
-            echo "::warning::no running monitoring host; skipping monitoring steps. Run monitoring-deploy (start) later: it syncs the target."
+            echo "::warning::no running monitoring host; skipping monitoring steps. Run monitoring-deploy (deploy) later: it syncs the target."
           fi
           echo "MON_ID=$MON" >> "$GITHUB_ENV"
 

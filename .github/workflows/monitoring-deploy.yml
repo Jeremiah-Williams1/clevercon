@@ -1,15 +1,18 @@
 name: monitoring-deploy
 
-# Manual only. Controls the monitoring host (Name=clevercon-monitoring): apply this commit, start it, or stop it.
-# The host itself is launched by hand (console) and its secrets are created by hand: see ops/docs/monitoring.md.
+# Manual only. Launches or updates the monitoring host (Name=clevercon-monitoring), stops it to save cost, or terminates it.
+#   deploy   : launch it if there is none, start it if stopped, put this commit on it, sync the staging target
+#   stop     : stop the instance (disk and private IP are kept)
+#   teardown : terminate the instance (its disk and the metrics history are deleted)
+# Secrets come from SSM Parameter Store (see ops/docs/monitoring.md); none pass through this workflow.
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: apply (update the stack and sync the staging target), start, or stop
+        description: deploy (launch/start and update), stop, or teardown (terminate)
         type: choice
-        options: [apply, start, stop]
-        default: apply
+        options: [deploy, stop, teardown]
+        default: deploy
 
 permissions:
   id-token: write
@@ -23,7 +26,7 @@ jobs:
   monitoring:
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       NAME: clevercon-monitoring
       SHA: ${{ github.sha }}
@@ -40,30 +43,50 @@ jobs:
           ID=$(aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
             --query 'Reservations[].Instances[].InstanceId | [0]' --output text)
-          [ "$ID" != "None" ] && [ -n "$ID" ] || { echo "::error::no monitoring host found (tag Name=$NAME). Launch it from the console first."; exit 1; }
+          [ "$ID" = "None" ] && ID=""
           echo "ID=$ID" >> "$GITHUB_ENV"
-          echo "monitoring host: $ID"
+          echo "existing monitoring host: ${ID:-none}"
 
       - name: Stop
         if: inputs.action == 'stop'
         run: |
+          [ -n "$ID" ] || { echo "nothing to stop"; exit 0; }
           aws ec2 stop-instances --instance-ids "$ID" --query 'StoppingInstances[].CurrentState.Name' --output text
           echo "Monitoring host stopping. The disk is kept and the private IP stays the same when it starts again." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Start and wait for SSM
-        if: inputs.action != 'stop'
+      - name: Teardown
+        if: inputs.action == 'teardown'
         run: |
-          aws ec2 start-instances --instance-ids "$ID" >/dev/null   # no-op if already running
+          [ -n "$ID" ] || { echo "nothing to tear down"; exit 0; }
+          aws ec2 terminate-instances --instance-ids "$ID" --query 'TerminatingInstances[].CurrentState.Name' --output text
+          echo "Monitoring host terminated: its disk and metrics history are gone." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Launch the host if there is none, else start it
+        if: inputs.action == 'deploy'
+        run: |
+          if [ -z "$ID" ]; then
+            AMI=$(aws ssm get-parameter --query Parameter.Value --output text \
+              --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id)
+            SG=$(aws ec2 describe-security-groups --filters Name=group-name,Values=clevercon-monitoring \
+              --query 'SecurityGroups[0].GroupId' --output text)
+            [ "$SG" != "None" ] || { echo "::error::security group clevercon-monitoring not found"; exit 1; }
+            TAGS="Tags=[{Key=Name,Value=$NAME},{Key=project,Value=clevercon}]"
+            ID=$(aws ec2 run-instances --image-id "$AMI" --instance-type t3.small \
+              --security-group-ids "$SG" --iam-instance-profile Name=clevercon-monitoring-ec2 \
+              --metadata-options HttpTokens=required,HttpEndpoint=enabled \
+              --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=20,VolumeType=gp3,Encrypted=true}' \
+              --user-data file://ops/scripts/bootstrap-host.sh \
+              --tag-specifications "ResourceType=instance,$TAGS" "ResourceType=volume,$TAGS" \
+              --query 'Instances[0].InstanceId' --output text)
+            echo "ID=$ID" >> "$GITHUB_ENV"
+            echo "launched $ID"
+          else
+            aws ec2 start-instances --instance-ids "$ID" >/dev/null   # no-op if already running
+          fi
           aws ec2 wait instance-running --instance-ids "$ID"
-          for i in $(seq 1 40); do
-            p=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" \
-                  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
-            [ "$p" = "Online" ] && break; sleep 15
-          done
-          [ "$p" = "Online" ] || { echo "::error::monitoring host never came online in SSM"; exit 1; }
 
       - name: Helper to run commands on the host
-        if: inputs.action != 'stop'
+        if: inputs.action == 'deploy'
         run: |
           cat > "$RUNNER_TEMP/remote.sh" <<'HELPER'
           # usage: remote "<script run as the ubuntu user>"  (fails if the script fails)
@@ -87,8 +110,24 @@ jobs:
           }
           HELPER
 
-      - name: Apply this commit
-        if: inputs.action == 'apply'
+      - name: Wait for SSM and the bootstrap
+        if: inputs.action == 'deploy'
+        run: |
+          . "$RUNNER_TEMP/remote.sh"
+          for i in $(seq 1 40); do
+            p=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" \
+                  --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || true)
+            [ "$p" = "Online" ] && break; sleep 15
+          done
+          [ "$p" = "Online" ] || { echo "::error::monitoring host never came online in SSM"; exit 1; }
+          for i in $(seq 1 40); do
+            remote "grep -q 'BOOTSTRAP DONE' /var/log/cloud-init-output.log && test -d ~/clevercon/.git" && break
+            sleep 15
+          done
+          remote "test -d ~/clevercon/.git"
+
+      - name: Put this commit on the host and start the stack
+        if: inputs.action == 'deploy'
         run: |
           . "$RUNNER_TEMP/remote.sh"
           remote "
@@ -96,8 +135,7 @@ jobs:
             git fetch --quiet origin $SHA
             git checkout --quiet --force $SHA
             cd ops/monitoring
-            test -s secrets/slack_url || { echo 'secrets/slack_url is missing or empty'; exit 1; }
-            test -s secrets/grafana_admin_password || { echo 'secrets/grafana_admin_password is missing or empty'; exit 1; }
+            bash setup-secrets.sh
             docker compose -f docker-compose.monitoring.yml up -d --force-recreate
             sleep 15
             docker compose -f docker-compose.monitoring.yml ps
@@ -105,7 +143,7 @@ jobs:
             curl -fsS localhost:9090/-/ready"
 
       - name: Sync the staging target
-        if: inputs.action != 'stop'
+        if: inputs.action == 'deploy'
         run: |
           . "$RUNNER_TEMP/remote.sh"
           IP=$(aws ec2 describe-instances \
@@ -113,8 +151,14 @@ jobs:
             --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
           if [ "$IP" = "None" ] || [ -z "$IP" ]; then
             remote "cd ~/clevercon && ./ops/monitoring/register-target.sh remove"
-            echo "No running staging host: target removed." >> "$GITHUB_STEP_SUMMARY"
+            echo "No running staging host: staging target removed." >> "$GITHUB_STEP_SUMMARY"
           else
             remote "cd ~/clevercon && ./ops/monitoring/register-target.sh add $IP"
             echo "Watching staging at $IP." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: How to open Grafana
+        if: inputs.action == 'deploy'
+        run: |
+          echo "Monitoring host $ID is up. Open Grafana from your laptop with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "aws ssm start-session --target $ID --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"3000\"],\"localPortNumber\":[\"3000\"]}'" >> "$GITHUB_STEP_SUMMARY"
