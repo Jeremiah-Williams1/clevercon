@@ -195,3 +195,5 @@ jobs:
         if: always() && inputs.action == 'deploy'
         run: |
           echo "Instance ${ID:-unknown} may still be running and billing. Run this workflow again with action teardown when you are done." >> "$GITHUB_STEP_SUMMARY"
+
+          
