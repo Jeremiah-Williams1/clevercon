@@ -29,6 +29,12 @@ esac
 
 dc up -d --force-recreate
 
+# Wait until Grafana has finished setting up its database. Running the CLI at the same time can leave a first start half-built.
+for _ in $(seq 1 36); do
+  curl -fsS localhost:3000/api/health 2>/dev/null | grep -q '"database": *"ok"' && break
+  sleep 5
+done
+
 # Grafana only reads the password file when it first creates its database, so sync it explicitly.
 ok=0
 for _ in 1 2 3 4 5 6; do
