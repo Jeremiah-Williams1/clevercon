@@ -15,6 +15,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # TODO: pin to an exact version (see the to-do below). "stable" means hashes can change when Rust updates.
+  RUST_VERSION: "stable"
+
 jobs:
   gitleaks:
     name: gitleaks
@@ -76,11 +80,14 @@ jobs:
           npm run build -w @clevercon/agent-sdk
           npm run build -w @clevercon/mcp
 
+      - name: Build the web app (his `npm run build`: typecheck plus vite build)
+        run: npm run build
+
       - name: SDK unit tests
         run: npx vitest run packages/agent-sdk
 
       - name: MCP smoke test (starts the real server and lists its tools)
-        run: npm test -w @clevercon/mcp
+        run: npm test -w @clevercon/mcp 
 
       - name: Check what would be published (only built files, README, package.json, LICENSE)
         run: |
@@ -198,3 +205,86 @@ jobs:
               --schema packages/db/prisma/schema.prisma >/dev/null
             npx vitest run "$f" || echo "(expected: this file has stale assertions upstream)"
           done
+
+  # His ci.yml matrix covers only agent-vault and policy-verifier. Its comment says registry
+  # has no Rust tests, but it has 5.
+  contracts-registry:
+    name: Rust contract (registry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt -c clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/registry
+
+      - name: Format
+        working-directory: contracts/registry
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: contracts/registry
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: contracts/registry
+        run: cargo test
+
+  # His contract-wasm.yml is manual only. This builds the same way on every change and records
+  # the hashes. The same wasm is what the local-node deploy will use in steps B and C.
+  wasm:
+    name: Contract wasm (build and hashes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -t wasm32v1-none
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            contracts/agent-vault
+            contracts/policy-verifier
+            contracts/registry
+
+      - name: Build each contract (same target as his contract-wasm.yml, lockfile enforced)
+        run: |
+          mkdir -p wasm
+          for c in agent-vault policy-verifier registry; do
+            echo "== building $c =="
+            cargo build --locked --release --target wasm32v1-none \
+              --manifest-path "contracts/$c/Cargo.toml"
+          done
+          find contracts -path '*/wasm32v1-none/release/*.wasm' \
+            -not -path '*/deps/*' -exec cp {} wasm/ \;
+          ls -la wasm
+
+      - name: Record the hashes
+        run: |
+          (cd wasm && sha256sum ./*.wasm) | tee wasm.sha256
+          {
+            echo "### Contract wasm ($(rustc --version), wasm32v1-none)"
+            echo '~~~'
+            cat wasm.sha256
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: |
+            wasm/
+            wasm.sha256
+          retention-days: 14
