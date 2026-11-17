@@ -80,7 +80,7 @@ jobs:
           npm run build -w @clevercon/agent-sdk
           npm run build -w @clevercon/mcp
 
-      - name: Build the web app (his `npm run build`: typecheck plus vite build)
+      - name: Build the web app (typecheck plus Vite build)
         run: npm run build
 
       - name: SDK unit tests
