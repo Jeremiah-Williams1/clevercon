@@ -232,7 +232,7 @@ jobs:
         with:
           workspaces: contracts/registry
 
-      - name: Format (informational: upstream registry is not rustfmt-clean, F24)
+      - name: Format (informational upstream registry is not rustfmt-clean, F24)
         working-directory: contracts/registry
         continue-on-error: true
         run: cargo fmt --check
