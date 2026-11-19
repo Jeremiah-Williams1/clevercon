@@ -1,0 +1,384 @@
+name: dev-checks
+
+# Checks for the dev branch (infra/main). Uses no secrets and no AWS access.
+# His own ci.yml only runs for `main`, so none of this duplicates it.
+on:
+  pull_request:
+    branches: [infra/main]
+  push:
+    branches: [infra/main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.100.0"
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the scan reads commit history, not just the latest files
+
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          V=8.18.4
+          curl -sSfL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Scan the commits in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          RANGE=""
+          if [ "$EVENT" = pull_request ]; then
+            RANGE="$PR_BASE..$PR_HEAD"
+          elif [ "${PUSH_BEFORE//0/}" != "" ]; then
+            RANGE="$PUSH_BEFORE..$SHA"
+          fi
+          echo "scanning: ${RANGE:-full history}"
+          gitleaks detect --source . --redact --no-banner --verbose ${RANGE:+--log-opts="$RANGE"}
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint every shell script under ops/
+        run: git ls-files -z -- 'ops/*.sh' | xargs -0 --no-run-if-empty shellcheck -S warning
+
+  packages:
+    name: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the SDK, then the MCP server (the MCP needs the SDK's output)
+        run: |
+          npm run build -w @clevercon/agent-sdk
+          npm run build -w @clevercon/mcp
+
+      - name: Build the web app (typecheck plus Vite build)
+        run: npm run build
+
+      - name: SDK unit tests
+        run: npx vitest run packages/agent-sdk
+
+      - name: MCP smoke test (starts the real server and lists its tools)
+        run: npm test -w @clevercon/mcp 
+
+      - name: Check what would be published (only built files, README, package.json, LICENSE)
+        run: |
+          npm pack --dry-run --json -w @clevercon/agent-sdk -w @clevercon/mcp > pack.json
+          jq -r '.[] | .name + "@" + .version + ": " + (.files | length | tostring) + " files"' pack.json
+          bad=$(jq -r '.[] | .name as $n | .files[].path | select(test("^(dist/|README\\.md$|package\\.json$|LICENSE(\\..*)?$)") | not) | $n + ": " + .' pack.json)
+          if [ -n "$bad" ]; then
+            echo "unexpected files would be published:"; echo "$bad"; exit 1
+          fi
+
+      # Upstream's own repo-wide checks. Informational: typecheck and format are red upstream today.
+      - name: Typecheck (informational)
+        id: typecheck
+        continue-on-error: true
+        run: npm run typecheck
+      - name: Lint (informational)
+        id: lint
+        continue-on-error: true
+        run: npm run lint
+      - name: Format check (informational)
+        id: format
+        continue-on-error: true
+        run: npm run format:check
+
+      - name: Summary of the informational checks
+        if: always()
+        run: |
+          {
+            echo "### Upstream checks (informational)"
+            echo "| check | result |"
+            echo "|---|---|"
+            echo "| typecheck | ${{ steps.typecheck.outcome }} |"
+            echo "| lint | ${{ steps.lint.outcome }} |"
+            echo "| format | ${{ steps.format.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Upstream's ci.yml never sets TEST_DATABASE_URL or REDIS_URL, so every *.integration.test.ts
+  # (api, indexer, workers) is skipped there. This job runs them against real Postgres and Redis.
+  services:
+    name: services (api, indexer, workers, db)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: clevercon
+          POSTGRES_PASSWORD: clevercon # throwaway database inside this job, not a real secret
+          POSTGRES_DB: clevercon
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U clevercon -d clevercon"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The tests wipe tables, so they use their own schema (cctest), as docs/development.md asks.
+      DATABASE_URL: postgresql://clevercon:clevercon@localhost:5432/clevercon?schema=cctest
+      TEST_DATABASE_URL: postgresql://clevercon:clevercon@localhost:5432/clevercon?schema=cctest
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the SDK (some tests import it from its built dist/ folder)
+        run: npm run build -w @clevercon/agent-sdk
+
+      - name: Create the tables (db push into the cctest schema)
+        run: npx prisma db push --skip-generate --schema packages/db/prisma/schema.prisma
+
+      - name: Typecheck the backend (api, indexer, workers, db, common)
+        run: |
+          for d in packages/common packages/db services/api services/indexer services/workers; do
+            echo "==> $d"; npx tsc --noEmit -p "$d/tsconfig.json"
+          done
+
+      # Each integration file gets a freshly reset schema. They share one database and some do not
+      # clean up after themselves (the webhooks test cannot delete users that other files left tasks for).
+      - name: Tests (unit tests, then each integration file on a fresh schema)
+        run: |
+          reset() {
+            npx prisma db push --force-reset --accept-data-loss --skip-generate \
+              --schema packages/db/prisma/schema.prisma >/dev/null
+          }
+          fail=0
+          echo "==> unit tests (database variables unset, so integration files skip themselves)"
+          env -u TEST_DATABASE_URL -u REDIS_URL npx vitest run packages services \
+            --exclude services/workers/src/executor.test.ts || fail=1
+          # policies and provider: upstream tests that no longer match the code (see the next step)
+          files=$(git ls-files | grep -E '\.integration\.test\.ts$' | grep -vE '/(policies|provider)\.integration' || true)
+          for f in $files; do
+            echo "==> $f"
+            reset
+            npx vitest run "$f" || fail=1
+          done
+          exit $fail
+  
+      # Upstream's Prisma stand-in lacks serviceSetup since commit 2da2769 (F27).
+      # Informational: when upstream updates the test, drop the --exclude above and delete this step.
+      - name: Stale unit test, executor.test.ts (informational)
+        continue-on-error: true
+        run: env -u TEST_DATABASE_URL -u REDIS_URL npx vitest run services/workers/src/executor.test.ts
+
+      # Known upstream drift (the tests expect old behaviour; the code is documented as changed).
+      # Informational: when upstream fixes the tests, move these two files into the step above.
+      - name: Stale upstream tests (informational)
+        continue-on-error: true
+        run: |
+          for f in services/api/src/policies/policies.integration.test.ts services/api/src/provider/provider.integration.test.ts; do
+            echo "==> $f"
+            npx prisma db push --force-reset --accept-data-loss --skip-generate \
+              --schema packages/db/prisma/schema.prisma >/dev/null
+            npx vitest run "$f" || echo "(expected: this file has stale assertions upstream)"
+          done
+
+  # His ci.yml matrix covers only agent-vault and policy-verifier. Its comment says registry
+  # has no Rust tests, but it has 5.
+  contracts-registry:
+    name: Rust contract (registry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt -c clippy
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts/registry
+
+      - name: Format (informational upstream registry is not rustfmt-clean, F24)
+        working-directory: contracts/registry
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: contracts/registry
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: contracts/registry
+        run: cargo test
+
+  # His contract-wasm.yml is manual only. This builds the same way on every change and records
+  # the hashes. The same wasm is what the local-node deploy will use in steps B and C.
+  wasm:
+    name: Contract wasm (build and hashes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -t wasm32v1-none
+          rustup default "$RUST_VERSION"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            contracts/agent-vault
+            contracts/policy-verifier
+            contracts/registry
+
+      - name: Build each contract (same target as his contract-wasm.yml, lockfile enforced)
+        run: |
+          mkdir -p wasm
+          for c in agent-vault policy-verifier registry; do
+            echo "== building $c =="
+            cargo build --locked --release --target wasm32v1-none \
+              --manifest-path "contracts/$c/Cargo.toml"
+          done
+          find contracts -path '*/wasm32v1-none/release/*.wasm' \
+            -not -path '*/deps/*' -exec cp {} wasm/ \;
+          ls -la wasm
+
+      - name: Record the hashes
+        run: |
+          (cd wasm && sha256sum ./*.wasm) | tee wasm.sha256
+          {
+            echo "### Contract wasm ($(rustc --version), wasm32v1-none)"
+            echo '~~~'
+            cat wasm.sha256
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: |
+            wasm/
+            wasm.sha256
+          retention-days: 14
+
+  # Step B1 + B2a: deploy this commit's contracts to a local Stellar network, then start the
+  # services against it. Informational for now (a failure does not fail the workflow).
+  local-chain:
+    name: Local chain and services
+    runs-on: ubuntu-latest
+    needs: wasm
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: clevercon
+          POSTGRES_PASSWORD: clevercon # throwaway database inside this job
+          POSTGRES_DB: clevercon
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U clevercon -d clevercon"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: artifacts
+
+      - name: Install stellar-cli (pinned, checksum verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STELLAR_CLI_VERSION: "30.0.1"
+          STELLAR_CLI_SHA256: "48c70074020e09af0a3ebbd2bf62d53c9aec47935e49a112d3cd90fb4e37658f"
+        run: |
+          gh release download "v${STELLAR_CLI_VERSION}" --repo stellar/stellar-cli \
+            --pattern '*x86_64-unknown-linux-gnu.tar.gz' --dir cli
+          echo "${STELLAR_CLI_SHA256}  cli/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | sha256sum -c -
+          tar -xzf cli/*.tar.gz -C cli
+          sudo install "$(find cli -name stellar -type f | head -n 1)" /usr/local/bin/stellar
+          stellar --version
+
+      - name: Start the local Stellar network
+        run: bash ops/ci/local-node.sh
+
+      - name: Deploy and initialise the contracts
+        run: bash ops/ci/deploy-local.sh
+
+      - name: HTTPS front for the local network (his services refuse http, F29)
+        run: bash ops/ci/tls-proxy.sh
+
+      - name: Build and start api, workers and indexer
+        run: bash ops/ci/start-services.sh
+
+      - name: End-to-end test (his e2e-testnet.ts, patched copy, throwaway wallets)
+        run: bash ops/ci/e2e-local.sh
+
+      - name: Logs (on failure)
+        if: failure()
+        run: |
+          docker logs --tail 100 clevercon-local-node || true
+          docker logs --tail 40 clevercon-tls-proxy || true
+          for f in .ci-out/logs/api.log .ci-out/logs/workers.log .ci-out/logs/indexer.log; do
+            echo "--- $f"; tail -n 60 "$f" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-chain-logs
+          # Public contract IDs and service logs of a throwaway network; never keys.env or tls/.
+          path: |
+            .ci-out/chain.env
+            .ci-out/logs/
+          retention-days: 3
+          if-no-files-found: ignore
