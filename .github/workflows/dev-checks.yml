@@ -336,12 +336,15 @@ jobs:
           name: contract-wasm
           path: artifacts
 
-      - name: Install stellar-cli (latest release; pin the printed version and checksum later)
+      - name: Install stellar-cli (pinned, checksum verified)
         env:
           GH_TOKEN: ${{ github.token }}
+          STELLAR_CLI_VERSION: "30.0.1"
+          STELLAR_CLI_SHA256: "48c70074020e09af0a3ebbd2bf62d53c9aec47935e49a112d3cd90fb4e37658f"
         run: |
-          gh release download --repo stellar/stellar-cli --pattern '*x86_64-unknown-linux-gnu.tar.gz' --dir cli
-          sha256sum cli/*.tar.gz
+          gh release download "v${STELLAR_CLI_VERSION}" --repo stellar/stellar-cli \
+            --pattern '*x86_64-unknown-linux-gnu.tar.gz' --dir cli
+          echo "${STELLAR_CLI_SHA256}  cli/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | sha256sum -c -
           tar -xzf cli/*.tar.gz -C cli
           sudo install "$(find cli -name stellar -type f | head -n 1)" /usr/local/bin/stellar
           stellar --version
