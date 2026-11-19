@@ -31,7 +31,6 @@ newkey() {
 }
 
 fund() {
-  local i
   for _ in 1 2 3 4 5 6; do
     if curl -fsS -m 30 "${FRIENDBOT_URL}?addr=$1" >/dev/null; then return 0; fi
     sleep 5
