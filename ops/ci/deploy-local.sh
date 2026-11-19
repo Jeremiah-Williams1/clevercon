@@ -32,7 +32,7 @@ newkey() {
 
 fund() {
   local i
-  for i in 1 2 3 4 5 6; do
+  for _ in 1 2 3 4 5 6; do
     if curl -fsS -m 30 "${FRIENDBOT_URL}?addr=$1" >/dev/null; then return 0; fi
     sleep 5
   done
@@ -41,10 +41,10 @@ fund() {
 }
 
 need_id() { # name value
-  case "$2" in
-    C??????????????????????????????????????????????????????) ;;
-    *) echo "$1 is not a contract ID: '$2'" >&2; exit 1 ;;
-  esac
+  if ! [[ "$2" =~ ^C[A-Z2-7]{55}$ ]]; then
+    echo "$1 is not a contract ID: '$2'" >&2
+    exit 1
+  fi
 }
 
 read -r ADMIN_PUB ADMIN_SEC < <(newkey)
