@@ -1,0 +1,137 @@
+name: staging-security
+
+# Runs on every PR into, and push to, the staging and prod branches. Uses no secrets
+# and no AWS access. His own CI (ci.yml) only runs for `main`, so nothing overlaps.
+on:
+  pull_request:
+    branches: [infra/staging, infra/prod]
+  push:
+    branches: [infra/staging, infra/prod]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the scan reads commit history, not just the latest files
+
+      - name: Install gitleaks (checksum-pinned)
+        run: |
+          V=8.18.4
+          curl -sSfL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "ba6dbb656933921c775ee5a2d1c13a91046e7952e9d919f9bac4cec61d628e7d  gl.tgz" | sha256sum -c -
+          tar -xzf gl.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Scan the commits in this change
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          RANGE=""
+          if [ "$EVENT" = pull_request ]; then
+            RANGE="$PR_BASE..$PR_HEAD"
+          elif [ "${PUSH_BEFORE//0/}" != "" ]; then
+            RANGE="$PUSH_BEFORE..$SHA"
+          fi
+          echo "scanning: ${RANGE:-full history}"
+          gitleaks detect --source . --redact --no-banner --verbose ${RANGE:+--log-opts="$RANGE"}
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Our staging scripts plus the two dev scripts that reach the server.
+      - run: shellcheck -S warning ops/staging/*.sh ops/scripts/bootstrap-host.sh ops/scripts/check-contract-ids.sh ops/monitoring/*.sh ops/monitoring/staging-collectors/*.sh
+
+  prometheus-rules:
+    name: prometheus-rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install promtool (checksum-pinned)
+        run: |
+          V=3.5.0
+          curl -sSfL -o prom.tgz "https://github.com/prometheus/prometheus/releases/download/v${V}/prometheus-${V}.linux-amd64.tar.gz"
+          echo "e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a  prom.tgz" | sha256sum -c -
+          tar -xzf prom.tgz --strip-components=1 "prometheus-${V}.linux-amd64/promtool"
+          sudo mv promtool /usr/local/bin/
+
+      - name: Check and test the alert rules
+        working-directory: ops/monitoring/prometheus
+        run: |
+          promtool check rules rules/clevercon.yml
+          promtool test rules tests/clevercon.test.yml
+
+  image-scan:
+    name: image-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (his Dockerfile unchanged, then our non-root layer)
+        run: |
+          docker build -t clevercon-base:local -f Dockerfile .
+          docker build -t clevercon-staging:local --build-arg BASE_IMAGE=clevercon-base:local ops/staging
+
+      - name: Trivy scan (writes trivy.json; never fails by itself)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: clevercon-staging:local
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: json
+          output: trivy.json
+          exit-code: '0'
+
+      - name: Evaluate the scan
+        run: |
+          [ -s trivy.json ] || { echo "no scan output"; exit 1; }
+          # Gate: fixable CRITICAL findings in the OS layer (ours to fix by rebuilding on a fresh base image).
+          # Library findings come from upstream's dependencies: listed below, not gating.
+          os_crit=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy.json)
+          os_high=$(jq '[.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy.json)
+          lib_crit=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | length' trivy.json)
+          lib_high=$(jq '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="HIGH")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | length' trivy.json)
+          secrets=$(jq '[.Results[]? | select(.Class=="secret") | .Secrets[]?] | length' trivy.json)
+          {
+            echo "### Image scan (fixable findings only)"
+            echo "| area | CRITICAL | HIGH |"
+            echo "|---|---|---|"
+            echo "| OS packages (gate) | $os_crit | $os_high |"
+            echo "| libraries and tools (informational) | $lib_crit | $lib_high |"
+            echo "| possible secrets (informational) | $secrets | |"
+            echo
+            echo "#### Library CRITICAL findings (upstream dependencies)"
+            echo "| CVE | package | installed | fixed in |"
+            echo "|---|---|---|---|"
+            jq -r '[.Results[]? | select(.Class=="lang-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL")] | unique_by(.VulnerabilityID + .PkgName + .InstalledVersion) | .[] | "| \(.VulnerabilityID) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) |"' trivy.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "OS CRITICAL: $os_crit | library CRITICAL: $lib_crit | library HIGH: $lib_high | possible secrets: $secrets"
+          if [ "$os_crit" != 0 ]; then
+            echo "Fixable CRITICAL vulnerabilities in the OS layer:"
+            jq -r '.Results[]? | select(.Class=="os-pkgs") | .Vulnerabilities[]? | select(.Severity=="CRITICAL") | "  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' trivy.json
+            exit 1
+          fi
+
+      - name: Contract check against Testnet (informational for now)
+        continue-on-error: true
+        run: |
+          ./ops/staging/gen-env.sh
+          ./ops/staging/check-contracts.sh

@@ -52,7 +52,7 @@ check('USDC_SAC', true);
 check('REGISTRY_CONTRACT_ID', false);
 const indexed = check('INDEXER_CONTRACT_IDS', true);
 
-for (const id of [...vault, ...verifier]) {
+for (const id of vault) {
   if (indexed.length && !indexed.includes(id)) {
     console.log(`WARN: ${id.slice(0, 8)}... is not in INDEXER_CONTRACT_IDS, so the indexer will not watch it`);
   }
