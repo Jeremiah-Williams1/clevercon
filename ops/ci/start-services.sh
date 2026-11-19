@@ -41,7 +41,8 @@ npm run db:seed
 # Only the services get the CA and the friendbot redirect.
 export NODE_EXTRA_CA_CERTS="$OUT/tls/cert.pem"
 export LOCAL_FRIENDBOT_URL="http://127.0.0.1:${NODE_PORT}/friendbot"
-export NODE_OPTIONS="--import=$(pwd)/ops/ci/friendbot-redirect.mjs"
+ROOT="$(pwd)"
+export NODE_OPTIONS="--import=${ROOT}/ops/ci/friendbot-redirect.mjs"
 
 mkdir -p "$OUT/logs"
 echo "== start"
