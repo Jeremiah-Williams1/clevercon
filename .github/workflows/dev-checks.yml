@@ -16,8 +16,7 @@ permissions:
   contents: read
 
 env:
-  # TODO: pin to an exact version (see the to-do below). "stable" means hashes can change when Rust updates.
-  RUST_VERSION: "stable"
+  RUST_VERSION: "1.100.0"
 
 jobs:
   gitleaks:
@@ -296,3 +295,55 @@ jobs:
             wasm/
             wasm.sha256
           retention-days: 14
+
+  # Step B1: prove this commit's contracts deploy and initialise on a local Stellar network.
+  # Informational for now (the job's failure does not fail the workflow). Remove continue-on-error
+  # once it has been green for a while.
+  local-chain:
+    name: Local chain (deploy this commit's contracts)
+    runs-on: ubuntu-latest
+    needs: wasm
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: artifacts
+
+      - name: Install stellar-cli (latest release; pin the printed version and checksum later)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo stellar/stellar-cli --pattern '*x86_64-unknown-linux-gnu.tar.gz' --dir cli
+          sha256sum cli/*.tar.gz
+          tar -xzf cli/*.tar.gz -C cli
+          sudo install "$(find cli -name stellar -type f | head -n 1)" /usr/local/bin/stellar
+          stellar --version
+
+      - name: Start the local Stellar network
+        run: bash ops/ci/local-node.sh
+
+      - name: Deploy and initialise the contracts
+        run: bash ops/ci/deploy-local.sh
+
+      - name: Local network log (on failure)
+        if: failure()
+        run: docker logs --tail 200 clevercon-local-node || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-chain-env
+          path: .ci-out/chain.env # public contract IDs only; never keys.env
+          retention-days: 3
+          if-no-files-found: ignore
