@@ -28,7 +28,7 @@ fn register_get_and_update_manifest() {
     let rec = client.get(&id);
     assert_eq!(rec.owner, owner);
     assert_eq!(rec.manifest_hash, hash(&env, 0xAA));
-    assert_eq!(rec.total_jobs, 0);
+    assert_eq!(rec.total_jobs, 1);
 
     client.set_manifest(&owner, &id, &hash(&env, 0xBB));
     assert_eq!(client.get(&id).manifest_hash, hash(&env, 0xBB));
