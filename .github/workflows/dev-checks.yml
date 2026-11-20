@@ -97,6 +97,9 @@ jobs:
             echo "unexpected files would be published:"; echo "$bad"; exit 1
           fi
 
+      - name: Package versions against the registry
+        run: node ops/ci/check-versions.mjs
+
       # Upstream's own repo-wide checks. Informational: typecheck and format are red upstream today.
       - name: Typecheck (informational)
         id: typecheck

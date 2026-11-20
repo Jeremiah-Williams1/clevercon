@@ -1,0 +1,62 @@
+name: release-rehearsal
+
+# Rehearses the npm package release (SDK, then MCP) against a throwaway local registry.
+# Nothing is published anywhere real, and no secrets or npm tokens are involved.
+on:
+  pull_request:
+    branches: [infra/main]
+    paths:
+      - 'packages/agent-sdk/**'
+      - 'packages/mcp/**'
+      - 'package-lock.json'
+      - 'ops/ci/check-versions.mjs'
+      - 'ops/ci/registry-up.sh'
+      - 'ops/ci/release-rehearsal.sh'
+      - '.github/workflows/release-rehearsal.yml'
+  push:
+    branches: [infra/**]
+    paths:
+      - 'packages/agent-sdk/**'
+      - 'packages/mcp/**'
+      - 'package-lock.json'
+      - 'ops/ci/check-versions.mjs'
+      - 'ops/ci/registry-up.sh'
+      - 'ops/ci/release-rehearsal.sh'
+      - '.github/workflows/release-rehearsal.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    name: rehearse release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start the local registry and run the rehearsal
+        run: |
+          bash ops/ci/registry-up.sh
+          bash ops/ci/release-rehearsal.sh
+
+      - name: Registry log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdaccio-log
+          path: .ci-out/verdaccio/verdaccio.log
+          retention-days: 3
+          if-no-files-found: ignore
