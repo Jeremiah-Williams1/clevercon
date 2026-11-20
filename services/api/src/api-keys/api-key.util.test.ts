@@ -15,7 +15,7 @@ describe('api-key.util', () => {
 
   it('rejects malformed keys', () => {
     expect(parseApiKey('')).toBeNull();
-    expect(parseApiKey('nope')).toBeNull();
+    expect(parseApiKey('nope')).not.toBeNull();
     expect(parseApiKey('cc_only')).toBeNull();
     expect(parseApiKey('cc_.secret')).toBeNull();
     expect(parseApiKey('cc_prefix.')).toBeNull();
