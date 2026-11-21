@@ -70,7 +70,13 @@ set_versions() {
     const [sdkV, mcpV] = process.argv.slice(1);
     const edit = (f, fn) => { const j = JSON.parse(fs.readFileSync(f, "utf8")); fn(j); fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n"); };
     edit("packages/agent-sdk/package.json", (j) => { j.version = sdkV; });
-    edit("packages/mcp/package.json", (j) => { j.version = mcpV; j.dependencies["@clevercon/agent-sdk"] = "^" + sdkV; });
+    edit("packages/mcp/package.json", (j) => {
+      j.version = mcpV;
+      // keep whichever list holds the SDK (runtime dependency, or dev dependency when it is bundled) in step
+      for (const list of ["dependencies", "devDependencies"]) {
+        if (j[list] && j[list]["@clevercon/agent-sdk"]) j[list]["@clevercon/agent-sdk"] = "^" + sdkV;
+      }
+    });
   ' "$1" "$2"
 }
 check_release() { node ops/ci/check-versions.mjs --release; }
@@ -86,6 +92,7 @@ new_sdk="$(next_patch "$base_sdk")"
 new_mcp="$(next_patch "$base_mcp")"
 pre_sdk="${new_sdk}-next.1"
 pre_mcp="${new_mcp}-next.1"
+sdk_is_runtime_dep="$(node -p "JSON.parse(require('fs').readFileSync('packages/mcp/package.json','utf8')).dependencies?.['@clevercon/agent-sdk'] ? 'yes' : 'no'")"
 echo "tree: ${SDK}@${base_sdk}, ${MCP}@${base_mcp}; rehearsing ${new_sdk} / ${new_mcp}"
 
 echo "== 1. pre-release under dist-tag next"
@@ -104,9 +111,14 @@ mkdir "$consumer"
   npm init -y > /dev/null
   npm install "${MCP}@next" --registry "$REGISTRY" --no-audit --no-fund
 )
-installed_sdk="$(pkg_version "$consumer/node_modules/@clevercon/agent-sdk/package.json")"
-[ "$installed_sdk" = "$pre_sdk" ] || fail "the MCP pulled SDK $installed_sdk, expected $pre_sdk"
-pass "installed MCP uses the SDK from this release ($installed_sdk)"
+if [ "$sdk_is_runtime_dep" = yes ]; then
+  installed_sdk="$(pkg_version "$consumer/node_modules/@clevercon/agent-sdk/package.json")"
+  [ "$installed_sdk" = "$pre_sdk" ] || fail "the MCP pulled SDK $installed_sdk, expected $pre_sdk"
+  pass "installed MCP uses the SDK from this release ($installed_sdk)"
+else
+  [ ! -e "$consumer/node_modules/@clevercon/agent-sdk" ] || fail "the SDK was installed although the MCP should bundle it"
+  pass "installed MCP is self-contained (SDK bundled, not installed)"
+fi
 reply="$(cd "$consumer" && printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | timeout 60 ./node_modules/.bin/clevercon-mcp)"
 jq -e 'select(.id == 1) | .result.tools | length > 0' <<< "$reply" > /dev/null || fail "the installed MCP did not list its tools"
 pass "installed MCP starts and lists its tools"
@@ -125,14 +137,18 @@ expect_blocked "a repeated version (version check)" check_release
 expect_blocked "a repeated version (registry)" npm publish -w "$MCP" --registry "$REGISTRY"
 set_versions "$base_sdk" "$base_mcp"
 expect_blocked "a lower version" check_release
-node -e '
-  const fs = require("fs");
-  const f = "packages/mcp/package.json";
-  const j = JSON.parse(fs.readFileSync(f, "utf8"));
-  j.dependencies["@clevercon/agent-sdk"] = "^0.0.1";
-  fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
-'
-expect_blocked "an MCP range that excludes this SDK" node ops/ci/check-versions.mjs
+if [ "$sdk_is_runtime_dep" = yes ]; then
+  node -e '
+    const fs = require("fs");
+    const f = "packages/mcp/package.json";
+    const j = JSON.parse(fs.readFileSync(f, "utf8"));
+    j.dependencies["@clevercon/agent-sdk"] = "^0.0.1";
+    fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+  '
+  expect_blocked "an MCP range that excludes this SDK" node ops/ci/check-versions.mjs
+else
+  echo "skipped: range drill (the MCP bundles the SDK, so there is no runtime range)"
+fi
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
