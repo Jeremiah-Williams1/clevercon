@@ -55,6 +55,6 @@ Keys are never uploaded.
 ## Pins and known gaps
 
 - Pinned: Rust (`RUST_VERSION`), `stellar-cli` version and checksum.
-- To pin by digest: `stellar/quickstart`, `nginx` (used by the HTTPS proxy).
+- `stellar/quickstart` and `nginx` are pinned by digest (`local-node.sh`, `tls-proxy.sh`). To update a pin, change the digest on a PR and check that `local-chain` stays green.
 - The local chain and the e2e are a copy of the maintainer's Testnet flow, not the flow itself.
   Findings F28 (friendbot URL) and F29 (`allowHttp: false`) are worked around, not fixed.

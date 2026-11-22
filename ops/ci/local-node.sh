@@ -4,7 +4,7 @@
 # Network passphrase: "Standalone Network ; February 2017". Throwaway: nothing is stored.
 set -euo pipefail
 
-IMAGE="${QUICKSTART_IMAGE:-stellar/quickstart:latest}" # TODO: pin by digest after the first green run
+IMAGE="${QUICKSTART_IMAGE:-stellar/quickstart:latest@sha256:cfcaeb9cd92867fabcecf33e3f56e499633ada388e45401e33319afe04ced90b}" # pinned; to update,
 NAME="${NODE_NAME:-clevercon-local-node}"
 PORT="${NODE_PORT:-8000}"
 WAIT_SECONDS="${NODE_WAIT_SECONDS:-300}"

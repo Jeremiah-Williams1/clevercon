@@ -37,7 +37,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --network host \
   -v "$DIR/default.conf:/etc/nginx/conf.d/default.conf:ro" \
   -v "$DIR:/certs:ro" \
-  nginx:1.27-alpine >/dev/null
+  nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8 >/dev/null
 
 for _ in $(seq 1 30); do
   if curl -fsS -m 5 --cacert "$DIR/cert.pem" -H 'Content-Type: application/json' \
