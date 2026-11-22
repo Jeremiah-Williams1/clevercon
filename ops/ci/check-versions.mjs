@@ -108,7 +108,11 @@ if (runtimeRange) {
     errors.push(`${mcp.name} asks for ${sdk.name}@${runtimeRange}, but this tree has ${sdk.version}; update the range`);
   }
 } else if (devRange) {
-  notes.push(`${mcp.name} bundles ${sdk.name} at build time (dev dependency ${devRange}); no runtime range to check.`);
+  if (semver.valid(sdk.version) && !semver.satisfies(sdk.version, devRange, { includePrerelease: true })) {
+    errors.push(`${mcp.name} bundles ${sdk.name}, but its range ${devRange} excludes this tree's ${sdk.version}; npm would bundle a registry copy instead of this tree's SDK`);
+  } else {
+    notes.push(`${mcp.name} bundles ${sdk.name} at build time (dev dependency ${devRange}); the range accepts this tree's ${sdk.version}.`);
+  }
 } else {
   warnings.push(`${mcp.name} does not list ${sdk.name} at all; the publish order assumption may be wrong`);
 }
